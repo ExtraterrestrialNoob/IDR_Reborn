@@ -41,4 +41,37 @@ private:
     std::string message_;
 };
 
+// Result<void> for operations that only report success/failure.
+template <>
+class Result<void> {
+public:
+    static Result ok() {
+        Result r;
+        r.ok_ = true;
+        return r;
+    }
+
+    static Result err(ErrorCode code, std::string message = "") {
+        Result r;
+        r.ok_ = false;
+        r.code_ = code;
+        r.message_ = std::move(message);
+        return r;
+    }
+
+    bool has_value() const { return ok_; }
+
+    void value() const {}
+
+    ErrorCode error() const { return code_; }
+    const std::string& message() const { return message_; }
+
+private:
+    Result() = default;
+
+    bool ok_ = false;
+    ErrorCode code_ = ErrorCode::ok;
+    std::string message_;
+};
+
 }  // namespace idr
