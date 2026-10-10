@@ -197,6 +197,9 @@ Result<ModuleRecord> read_module(Reader& r) {
     if (!filename.has_value()) return Result<ModuleRecord>::err(filename.error(), filename.message());
     auto n = r.u32();
     if (!n.has_value()) return Result<ModuleRecord>::err(n.error(), n.message());
+    if (n.value() > r.remaining() / 2) {  // each use id is a u16
+        return Result<ModuleRecord>::err(ErrorCode::truncated, "module uses count out of range");
+    }
 
     m.id = id.value();
     m.name = std::move(name.value());
@@ -324,6 +327,11 @@ Result<ProcRecord> read_proc(Reader& r) {
     }
     auto anum = r.u32();
     if (!anum.has_value()) return Result<ProcRecord>::err(anum.error(), anum.message());
+    // Smallest arg: tag(1) + in_register(1) + reg_index(4) + size(4)
+    //              + name(4 for an empty string) + type(4) = 18 bytes.
+    if (anum.value() > r.remaining() / 18) {
+        return Result<ProcRecord>::err(ErrorCode::truncated, "proc arg count out of range");
+    }
     p.args.reserve(anum.value());
     for (uint32_t i = 0; i < anum.value(); ++i) {
         auto a = read_arg(r);
@@ -463,6 +471,12 @@ Result<KbData> read_v3(std::span<const std::byte> buf) {
         uint64_t offset;
         uint64_t size;
     };
+    // Each directory entry is 24 bytes; bound the count by the bytes remaining
+    // after the header so a crafted huge count cannot drive reserve().
+    const size_t remaining_after_header = buf.size() - r.pos();
+    if (section_count.value() > remaining_after_header / kSectionDirEntrySize) {
+        return Result<KbData>::err(ErrorCode::truncated, "section count out of range");
+    }
     std::vector<DirEntry> dir;
     dir.reserve(section_count.value());
     for (uint32_t i = 0; i < section_count.value(); ++i) {

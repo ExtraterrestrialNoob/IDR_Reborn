@@ -94,6 +94,18 @@ void write_bytes(const fs::path& path, const std::vector<std::byte>& bytes) {
               static_cast<std::streamsize>(bytes.size()));
 }
 
+// A minimal 293-byte v2 header with kbVer == 2.
+std::vector<std::byte> make_v2_header_bytes() {
+    std::vector<std::byte> bytes(293, std::byte{0});
+    const char* sig = "IDR Knowledge Base File";
+    for (size_t i = 0; i < 23; ++i) {
+        bytes[i] = static_cast<std::byte>(sig[i]);
+    }
+    // isMSIL(24)=0, delphiVer(25..28)=0, crc(29..32)=0, description(33..288)=0.
+    bytes[289] = std::byte{2};  // kbVer (little-endian u32) = 2
+    return bytes;
+}
+
 }  // namespace
 
 TEST(KbV3, round_trips_dump_and_args_byte_exact) {
@@ -178,14 +190,94 @@ TEST(KbV3, rejects_unsupported_version) {
     fs::remove(path);
 }
 
-TEST(KbLegacyV2, opens_kb2014_bin) {
-    const fs::path fixture = fs::path(IDR_REPO_ROOT) / "kb2014.bin";
+TEST(KbLegacyV2, opens_v2_kb_bin) {
+    // Prefer the in-repo syskb2014.bin (a real v2 KB); fall back to kb2014.bin,
+    // and skip only if neither is present.
+    const fs::path sys_fixture = fs::path(IDR_REPO_ROOT) / "syskb2014.bin";
+    const fs::path kb_fixture = fs::path(IDR_REPO_ROOT) / "kb2014.bin";
+    const fs::path fixture = fs::exists(sys_fixture) ? sys_fixture : kb_fixture;
     if (!fs::exists(fixture)) {
-        GTEST_SKIP() << "kb2014.bin fixture not present";
+        GTEST_SKIP() << "no v2 KB fixture present";
     }
 
     auto opened = KnowledgeBase::open(fixture);
     ASSERT_TRUE(opened.has_value()) << opened.message();
     EXPECT_EQ(opened.value().format_version(), 2u);
-    EXPECT_FALSE(opened.value().data().procs.empty());
+    EXPECT_GT(opened.value().data().procs.size(), 1000u);
+
+    // A known proc resolves, and its args map locflags -> in_register and
+    // Ndx -> reg_index (the regression net for the v2 ARGINFO layout).
+    auto idx = opened.value().find_proc("InterlockedExchange");
+    ASSERT_TRUE(idx.has_value());
+    const auto& proc = opened.value().data().procs[*idx];
+    EXPECT_EQ(proc.name, "InterlockedExchange");
+    EXPECT_EQ(proc.result_type, "System.Integer");
+    ASSERT_EQ(proc.args.size(), 2u);
+    EXPECT_EQ(proc.args[0].name, "Target");
+    EXPECT_EQ(proc.args[1].name, "Value");
+    EXPECT_EQ(proc.args[0].reg_index, 8);
+    EXPECT_EQ(proc.args[1].reg_index, 12);
+    EXPECT_FALSE(proc.args[0].in_register);
+    EXPECT_FALSE(proc.args[1].in_register);
+
+    // The register flag must actually be parsed (not left at its default):
+    // the KB should contain at least one register-passed argument.
+    bool saw_register_arg = false;
+    for (const auto& p : opened.value().data().procs) {
+        for (const auto& a : p.args) {
+            if (a.in_register) {
+                saw_register_arg = true;
+                break;
+            }
+        }
+        if (saw_register_arg) break;
+    }
+    EXPECT_TRUE(saw_register_arg);
+}
+
+TEST(KbLegacyV2, rejects_out_of_range_sections_offset) {
+    auto bytes = make_v2_header_bytes();
+    bytes.resize(300, std::byte{0});
+    // Tail sections offset points past EOF (must be rejected, not read).
+    bytes[296] = std::byte{0xFF};
+    bytes[297] = std::byte{0xFF};
+    bytes[298] = std::byte{0xFF};
+    bytes[299] = std::byte{0xFF};
+
+    auto path = temp_path("badoffset");
+    write_bytes(path, bytes);
+
+    auto opened = KnowledgeBase::open(path);
+    ASSERT_FALSE(opened.has_value());
+    EXPECT_EQ(opened.error(), idr::ErrorCode::truncated);
+
+    fs::remove(path);
+}
+
+TEST(KbLegacyV2, rejects_huge_section_count_without_allocating) {
+    // A crafted count must be rejected by the byte-bounded guard before it
+    // drives reserve(); otherwise reserve(INT32_MAX * 16 bytes) would throw
+    // std::length_error/bad_alloc across the open() boundary.
+    auto bytes = make_v2_header_bytes();
+    bytes.resize(320, std::byte{0});
+    const uint32_t sections_offset = 300;  // points at the modules table header
+    // count = INT32_MAX (positive), maxsize = 0.
+    bytes[sections_offset + 0] = std::byte{0xFF};
+    bytes[sections_offset + 1] = std::byte{0xFF};
+    bytes[sections_offset + 2] = std::byte{0xFF};
+    bytes[sections_offset + 3] = std::byte{0x7F};
+    // Tail sections offset (last 4 bytes), little-endian.
+    for (int i = 0; i < 4; ++i) {
+        bytes[316 + i] =
+            std::byte{static_cast<uint8_t>((sections_offset >> (8 * i)) & 0xFF)};
+    }
+
+    auto path = temp_path("hugecount");
+    write_bytes(path, bytes);
+
+    auto opened = KnowledgeBase::open(path);
+    ASSERT_FALSE(opened.has_value());
+    EXPECT_EQ(opened.error(), idr::ErrorCode::truncated);
+
+    fs::remove(path);
 }

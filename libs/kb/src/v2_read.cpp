@@ -99,6 +99,9 @@ Result<KbData> read_v2(std::span<const std::byte> buf) {
     if (!sections_offset.has_value()) {
         return Result<KbData>::err(ErrorCode::truncated, "missing sections offset");
     }
+    if (sections_offset.value() > buf.size() - 4) {
+        return Result<KbData>::err(ErrorCode::truncated, "sections offset out of range");
+    }
 
     struct OffsetsInfo {
         uint32_t offset;
@@ -115,6 +118,11 @@ Result<KbData> read_v2(std::span<const std::byte> buf) {
         if (!max.has_value()) return Result<int32_t>::err(max.error(), max.message());
         if (count.value() < 0) {
             return Result<int32_t>::err(ErrorCode::truncated, "negative section count");
+        }
+        // Each OFFSETSINFO entry is 16 bytes; bound the count by the bytes
+        // still available so a crafted huge count cannot drive reserve().
+        if (static_cast<uint64_t>(count.value()) > r.remaining() / 16) {
+            return Result<int32_t>::err(ErrorCode::truncated, "section count out of range");
         }
         out.clear();
         out.reserve(static_cast<size_t>(count.value()));
@@ -303,7 +311,8 @@ Result<KbData> read_v2(std::span<const std::byte> buf) {
         if (!dump.has_value()) return Result<KbData>::err(dump.error(), dump.message());
 
         // Args: DWORD ArgsTotal (includes the 2-byte count), WORD ArgsNum,
-        // then ArgsNum * ARGINFO (Tag u8, Ndx i32, Size i32, Name, TypeDef).
+        // then ArgsNum * ARGINFO. Each ARGINFO (mirrors FillArgInfo, Misc.cpp):
+        //   Tag u8, locflags i32, Ndx i32, Name, TypeDef.
         auto args_total = r.u32();
         auto args_num = r.u16();
         if (!args_total.has_value() || !args_num.has_value()) {
@@ -319,21 +328,24 @@ Result<KbData> read_v2(std::span<const std::byte> buf) {
         p.result_type = std::move(result.value());
         p.dump = std::move(dump.value());
         p.relocs = std::move(relocs);
-        // v2 does not serialize per-arg register flags; fixups are skipped.
         for (uint16_t i = 0; i < args_num.value(); ++i) {
             ArgRecord a;
             auto tag = r.u8();
+            auto locflags = r.u32();
             auto ndx = r.i32();
-            auto sz = r.u32();
             auto aname = read_v2_string(r);
             auto atype = read_v2_string(r);
-            if (!tag.has_value() || !ndx.has_value() || !sz.has_value() ||
+            if (!tag.has_value() || !locflags.has_value() || !ndx.has_value() ||
                 !aname.has_value() || !atype.has_value()) {
                 return Result<KbData>::err(ErrorCode::truncated, "short arg record");
             }
             a.tag = tag.value();
+            if ((locflags.value() & 7u) == 1u) {
+                a.tag = 0x23;  // 'const' override (mirrors FillArgInfo)
+            }
+            a.in_register = (locflags.value() & 8u) != 0;
             a.reg_index = ndx.value();
-            a.size = sz.value();
+            a.size = 4;  // v2 does not store arg size; legacy assumes pointer width
             a.name = std::move(aname.value());
             a.type = std::move(atype.value());
             p.args.push_back(std::move(a));
