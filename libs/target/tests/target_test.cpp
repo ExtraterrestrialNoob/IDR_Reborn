@@ -211,6 +211,21 @@ TEST(TargetDetect, plain_non_delphi_image_is_unsupported) {
     EXPECT_EQ(detected.error(), ErrorCode::unsupported_version);
 }
 
+// Minor 2: a PE32+ image must not be probed with the 32-bit syskb ladder. Plant
+// the >=2010 table so that, without the x86 gate, detection would confidently
+// report 2010; instead the image must be rejected as unsupported.
+TEST(TargetDetect, pe32plus_image_is_unsupported_not_a_wrong_version) {
+    auto bytes = make_minimal_pe(Arch::x64, kDefaultImageBase);
+    plant_extended_init_table(bytes, kDefaultImageBase);
+    auto pe = PeFile::parse(bytes);
+    ASSERT_TRUE(pe.has_value());
+    EXPECT_EQ(pe.value().arch(), Arch::x64);
+
+    auto detected = TargetProfile::detect(pe.value(), no_kb_dir());
+    ASSERT_FALSE(detected.has_value());
+    EXPECT_EQ(detected.error(), ErrorCode::unsupported_version);
+}
+
 TEST(TargetDetect, extended_init_table_falls_back_to_2010) {
     auto bytes = make_minimal_pe(Arch::x86, kDefaultImageBase);
     plant_extended_init_table(bytes, kDefaultImageBase);

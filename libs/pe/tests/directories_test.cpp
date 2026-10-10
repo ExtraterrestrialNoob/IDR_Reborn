@@ -116,3 +116,33 @@ TEST(ParseExports, single_named_export) {
     EXPECT_EQ(exp.rva, 0x1700u);
     EXPECT_EQ(exp.ordinal, 1);
 }
+
+// Minor 5: the descriptor walk must stop at the declared directory size. With a
+// size covering a single descriptor, the terminating null descriptor lies
+// outside the directory and the walk must fail closed instead of running on.
+TEST(ParseImports, directory_size_caps_descriptor_walk) {
+    auto bytes = make_minimal_pe(Arch::x86, 0x400000);
+    add_import(bytes, "KERNEL32.dll", {"GetProcAddress"});
+    idr::pe::test_detail::set_data_directory(bytes, 1, 0x1000, 20);
+    auto pe = idr::pe::PeFile::parse(bytes);
+    ASSERT_TRUE(pe.has_value());
+
+    auto imports = idr::pe::parse_imports(pe.value());
+    ASSERT_FALSE(imports.has_value());
+    EXPECT_EQ(imports.error(), idr::ErrorCode::truncated);
+}
+
+// Minor 5: the export name/ordinal/function table walks are likewise capped by
+// the declared directory size.
+TEST(ParseExports, directory_size_caps_table_walks) {
+    auto bytes = make_minimal_pe(Arch::x86);
+    add_export(bytes, {"MyFunc"});
+    // Directory covering only the 40-byte header; the tables lie beyond it.
+    idr::pe::test_detail::set_data_directory(bytes, 0, 0x1000, 40);
+    auto pe = idr::pe::PeFile::parse(bytes);
+    ASSERT_TRUE(pe.has_value());
+
+    auto exports = idr::pe::parse_exports(pe.value());
+    ASSERT_FALSE(exports.has_value());
+    EXPECT_EQ(exports.error(), idr::ErrorCode::truncated);
+}

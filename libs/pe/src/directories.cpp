@@ -89,12 +89,28 @@ Result<std::vector<Import>> parse_imports(const PeFile& pe) {
     const uint64_t ordinal_flag = pe.is_64() ? (1ull << 63) : (1ull << 31);
     std::vector<Import> imports;
 
+    // Bound the walks by the declared import-directory size (when nonzero) so a
+    // malformed directory cannot walk the whole mapped image. A zero size keeps
+    // the legacy at_rva-only bound; an rva of 0 was handled above.
+    const auto in_dir = [&dd](uint64_t addr, uint64_t len) {
+        if (dd->size == 0) {
+            return true;
+        }
+        const uint64_t lo = dd->rva;
+        const uint64_t hi = lo + dd->size;
+        return addr >= lo && addr <= hi && len <= hi - addr;
+    };
+
     // Walk the NUL-terminated import descriptor array.
     for (size_t di = 0;; ++di) {
         const uint64_t desc_addr = static_cast<uint64_t>(dd->rva) + di * kImportDescriptorSize;
         if (desc_addr > 0xFFFFFFFFull) {
             return Result<std::vector<Import>>::err(ErrorCode::out_of_range,
                                                     "import descriptor RVA overflow");
+        }
+        if (!in_dir(desc_addr, kImportDescriptorSize)) {
+            return Result<std::vector<Import>>::err(
+                ErrorCode::truncated, "import descriptor past directory size");
         }
         auto desc = pe.at_rva(static_cast<uint32_t>(desc_addr), kImportDescriptorSize);
         if (!desc.has_value()) {
@@ -131,6 +147,10 @@ Result<std::vector<Import>> parse_imports(const PeFile& pe) {
             if (thunk_addr > 0xFFFFFFFFull) {
                 return Result<std::vector<Import>>::err(ErrorCode::out_of_range,
                                                         "thunk RVA overflow");
+            }
+            if (!in_dir(thunk_addr, ptr_size)) {
+                return Result<std::vector<Import>>::err(
+                    ErrorCode::truncated, "import thunk past directory size");
             }
             auto thunk_bytes = pe.at_rva(static_cast<uint32_t>(thunk_addr), ptr_size);
             if (!thunk_bytes.has_value()) {
@@ -209,12 +229,29 @@ Result<std::vector<Export>> parse_exports(const PeFile& pe) {
 
     std::vector<Export> exports;
 
+    // As with imports, cap the table walks by the declared export-directory size
+    // (when nonzero) so a malformed directory cannot walk the whole mapped
+    // image. A zero size keeps the legacy at_rva-only bound; an rva of 0 was
+    // handled above.
+    const auto in_dir = [&dd](uint64_t addr, uint64_t len) {
+        if (dd->size == 0) {
+            return true;
+        }
+        const uint64_t lo = dd->rva;
+        const uint64_t hi = lo + dd->size;
+        return addr >= lo && addr <= hi && len <= hi - addr;
+    };
+
     for (uint32_t i = 0; i < num_names.value(); ++i) {
         const uint64_t name_slot =
             static_cast<uint64_t>(addr_names.value()) + static_cast<uint64_t>(i) * 4u;
         if (name_slot > 0xFFFFFFFFull) {
             return Result<std::vector<Export>>::err(ErrorCode::out_of_range,
                                                     "export name RVA overflow");
+        }
+        if (!in_dir(name_slot, 4)) {
+            return Result<std::vector<Export>>::err(
+                ErrorCode::truncated, "export name table past directory size");
         }
         auto name_rva = read_rva_u32(pe, static_cast<uint32_t>(name_slot));
         if (!name_rva.has_value()) {
@@ -230,6 +267,10 @@ Result<std::vector<Export>> parse_exports(const PeFile& pe) {
         if (ord_slot > 0xFFFFFFFFull) {
             return Result<std::vector<Export>>::err(ErrorCode::out_of_range,
                                                     "export ordinal RVA overflow");
+        }
+        if (!in_dir(ord_slot, 2)) {
+            return Result<std::vector<Export>>::err(
+                ErrorCode::truncated, "export ordinal table past directory size");
         }
         auto ord_bytes = pe.at_rva(static_cast<uint32_t>(ord_slot), 2);
         if (!ord_bytes.has_value()) {
@@ -249,6 +290,10 @@ Result<std::vector<Export>> parse_exports(const PeFile& pe) {
         if (func_slot > 0xFFFFFFFFull) {
             return Result<std::vector<Export>>::err(ErrorCode::out_of_range,
                                                     "export function RVA overflow");
+        }
+        if (!in_dir(func_slot, 4)) {
+            return Result<std::vector<Export>>::err(
+                ErrorCode::truncated, "export function table past directory size");
         }
         auto func_rva = read_rva_u32(pe, static_cast<uint32_t>(func_slot));
         if (!func_rva.has_value()) {

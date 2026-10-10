@@ -23,9 +23,10 @@ namespace idr::analyze {
 // A profile without a known `class_name` offset (an unported compiler version)
 // has no criterion to apply and therefore yields no candidates.
 //
-// Sections are visited in table order, so the results come out in table order
-// (ascending image address for a well-formed image) and every RVA is visited
-// at most once.
+// Sections are visited in PE section-table order, so results are appended in
+// that order and every RVA is visited at most once. The section table is not
+// required to be sorted by address, so the results are ascending by address
+// only for an image whose section table happens to be ascending.
 std::vector<uint64_t> find_vmt_roots(const pe::PeFile& image,
                                      const target::TargetProfile& profile);
 

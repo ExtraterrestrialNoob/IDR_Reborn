@@ -3,7 +3,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <new>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -30,45 +32,56 @@ bool starts_with(std::span<const std::byte> buf, const char* s, size_t n) {
 }  // namespace
 
 Result<KnowledgeBase> KnowledgeBase::open(std::filesystem::path path) {
-    std::ifstream in(path, std::ios::binary | std::ios::ate);
-    if (!in) {
-        return Result<KnowledgeBase>::err(ErrorCode::io_error, "cannot open file");
-    }
-    const std::streamsize size = in.tellg();
-    if (size <= 0) {
-        return Result<KnowledgeBase>::err(ErrorCode::truncated, "empty file");
-    }
-    in.seekg(0, std::ios::beg);
-    std::vector<std::byte> buf(static_cast<size_t>(size));
-    in.read(reinterpret_cast<char*>(buf.data()), size);
-    if (!in) {
-        return Result<KnowledgeBase>::err(ErrorCode::io_error, "read failed");
-    }
-
-    std::span<const std::byte> span(buf);
-
-    Result<KbData> parsed = [&]() -> Result<KbData> {
-        if (starts_with(span, kMagicV3, 5)) {
-            return read_v3(span);
+    // No exception may cross this boundary. The file-sized buffer and the
+    // parser's internal vectors can throw bad_alloc/length_error on a hostile
+    // (e.g. absurdly large) input; translate those into an ErrorCode.
+    try {
+        std::ifstream in(path, std::ios::binary | std::ios::ate);
+        if (!in) {
+            return Result<KnowledgeBase>::err(ErrorCode::io_error, "cannot open file");
         }
-        if (starts_with(span, kSignatureV2, 23)) {
-            return read_v2(span);
+        const std::streamsize size = in.tellg();
+        if (size <= 0) {
+            return Result<KnowledgeBase>::err(ErrorCode::truncated, "empty file");
         }
-        if (starts_with(span, kSignatureV1, 23)) {
-            // Legacy v1 ("IDD") is recognized but not supported.
-            return Result<KbData>::err(ErrorCode::unsupported_version,
-                                       "v1 KB files are not supported");
+        in.seekg(0, std::ios::beg);
+        std::vector<std::byte> buf(static_cast<size_t>(size));
+        in.read(reinterpret_cast<char*>(buf.data()), size);
+        if (!in) {
+            return Result<KnowledgeBase>::err(ErrorCode::io_error, "read failed");
         }
-        return Result<KbData>::err(ErrorCode::bad_magic, "unknown KB magic");
-    }();
 
-    if (!parsed.has_value()) {
-        return Result<KnowledgeBase>::err(parsed.error(), parsed.message());
+        std::span<const std::byte> span(buf);
+
+        Result<KbData> parsed = [&]() -> Result<KbData> {
+            if (starts_with(span, kMagicV3, 5)) {
+                return read_v3(span);
+            }
+            if (starts_with(span, kSignatureV2, 23)) {
+                return read_v2(span);
+            }
+            if (starts_with(span, kSignatureV1, 23)) {
+                // Legacy v1 ("IDD") is recognized but not supported.
+                return Result<KbData>::err(ErrorCode::unsupported_version,
+                                           "v1 KB files are not supported");
+            }
+            return Result<KbData>::err(ErrorCode::bad_magic, "unknown KB magic");
+        }();
+
+        if (!parsed.has_value()) {
+            return Result<KnowledgeBase>::err(parsed.error(), parsed.message());
+        }
+
+        KnowledgeBase kb;
+        kb.data_ = std::move(parsed.value());
+        return Result<KnowledgeBase>::ok(std::move(kb));
+    } catch (const std::bad_alloc&) {
+        return Result<KnowledgeBase>::err(ErrorCode::io_error,
+                                          "out of memory reading KB file");
+    } catch (const std::length_error&) {
+        return Result<KnowledgeBase>::err(ErrorCode::io_error,
+                                          "KB file too large to load");
     }
-
-    KnowledgeBase kb;
-    kb.data_ = std::move(parsed.value());
-    return Result<KnowledgeBase>::ok(std::move(kb));
 }
 
 std::optional<size_t> KnowledgeBase::find_proc(std::string_view name) const {

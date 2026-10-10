@@ -22,10 +22,6 @@ constexpr uint32_t kSectionTypes = 3;
 constexpr uint32_t kSectionProcs = 4;
 constexpr uint32_t kSectionCount = 4;
 
-// Reserved fields without a KbData counterpart.
-constexpr uint8_t kArchDefault = 0;
-constexpr uint8_t kVendorCodeDefault = 0;
-
 constexpr size_t kSectionDirEntrySize = 24;  // u32 id + u32 count + u64 off + u64 size
 
 using detail::Reader;
@@ -369,8 +365,8 @@ Result<void> write_v3(std::filesystem::path path, const KbData& data) {
         header.u8(static_cast<uint8_t>(c));
     }
     header.u32(kFormatVersion3);
-    header.u8(kArchDefault);
-    header.u8(kVendorCodeDefault);
+    header.u8(static_cast<uint8_t>(data.arch));
+    header.u8(data.vendor_code);
     header.i32(data.compiler_version);
     header.string(data.compiler_id);
     header.u8(data.pointer_size);
@@ -440,17 +436,16 @@ Result<KbData> read_v3(std::span<const std::byte> buf) {
                                    "unsupported format version");
     }
 
-    auto arch = r.u8();          // reserved
-    auto vendor_code = r.u8();   // reserved
+    auto arch = r.u8();          // target architecture
+    auto vendor_code = r.u8();   // vendor discriminator
     auto compiler_version = r.i32();
     auto compiler_id = r.string();
     auto pointer_size = r.u8();
     auto description = r.string();
     auto section_count = r.u32();
     auto checksum = r.u32();
-    (void)arch;
-    (void)vendor_code;
-    if (!compiler_version.has_value() || !compiler_id.has_value() ||
+    if (!arch.has_value() || !vendor_code.has_value() ||
+        !compiler_version.has_value() || !compiler_id.has_value() ||
         !pointer_size.has_value() || !description.has_value() ||
         !section_count.has_value() || !checksum.has_value()) {
         return Result<KbData>::err(ErrorCode::truncated, "short v3 header");
@@ -461,7 +456,8 @@ Result<KbData> read_v3(std::span<const std::byte> buf) {
     const size_t covered_size = buf.size() - directory_offset;
     const uint32_t actual = detail::fnv1a(buf.subspan(directory_offset, covered_size));
     if (actual != checksum.value()) {
-        return Result<KbData>::err(ErrorCode::io_error, "v3 checksum mismatch");
+        // A bad checksum is a corrupt-format condition, not an I/O failure.
+        return Result<KbData>::err(ErrorCode::unsupported_format, "v3 checksum mismatch");
     }
 
     // Read the section directory.
@@ -493,6 +489,20 @@ Result<KbData> read_v3(std::span<const std::byte> buf) {
 
     KbData data;
     data.format_version = version.value();
+    // A zero reserved byte predates the architecture field and reads as
+    // unknown; values outside the enum also fall back to unknown.
+    switch (arch.value()) {
+        case static_cast<uint8_t>(Arch::x86):
+            data.arch = Arch::x86;
+            break;
+        case static_cast<uint8_t>(Arch::x64):
+            data.arch = Arch::x64;
+            break;
+        default:
+            data.arch = Arch::unknown;
+            break;
+    }
+    data.vendor_code = vendor_code.value();
     data.vendor = std::move(description.value());
     data.compiler_version = compiler_version.value();
     data.compiler_id = std::move(compiler_id.value());

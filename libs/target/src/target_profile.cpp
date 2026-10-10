@@ -466,6 +466,14 @@ Result<TargetProfile> TargetProfile::detect(const pe::PeFile& image,
         return Result<TargetProfile>::err(ErrorCode::unsupported_format,
                                           "unknown PE architecture");
     }
+    if (image.arch() != pe::Arch::x86) {
+        // The Phase 0 ladder probes 32-bit `syskb*.bin` dumps against a flattened
+        // image that `build_flat_image` effectively treats as 32-bit; running it
+        // on a PE32+ image could produce a confident but wrong version. Report
+        // the architecture as unsupported instead of guessing.
+        return Result<TargetProfile>::err(ErrorCode::unsupported_version,
+                                          "x64 images are not supported by detection");
+    }
     return detect_embarcadero(image, sys_kb_dir);
 }
 

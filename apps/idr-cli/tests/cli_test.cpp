@@ -107,6 +107,7 @@ TEST(CliScanReport, synthetic_pe32_reports_arch_sections_imports_and_vmt_roots) 
     EXPECT_NE(report.find("arch: x86"), std::string::npos) << report;
     EXPECT_NE(report.find("sections:"), std::string::npos) << report;
     EXPECT_NE(report.find("imports:"), std::string::npos) << report;
+    EXPECT_NE(report.find("vendor: embarcadero"), std::string::npos) << report;
     EXPECT_GT(line_int(report, "vmt roots:"), 0) << report;
 }
 

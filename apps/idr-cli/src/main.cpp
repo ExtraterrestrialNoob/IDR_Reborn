@@ -84,6 +84,10 @@ int main(int argc, char** argv) {
 
     std::string report;
     bool guarded = false;
+    // Defense in depth: under MSVC the SEH `__except` in `guarded_scan` matches
+    // C++ exceptions first, so these catch blocks are normally unreachable
+    // there. They are kept as a portable fallback for non-SEH builds (and
+    // document that no exception may escape `main`), not as dead code.
     try {
         guarded = guarded_scan(opt, report);
     } catch (const std::exception& e) {

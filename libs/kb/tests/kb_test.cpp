@@ -24,7 +24,9 @@ namespace {
 KbData make_sample_kb() {
     KbData kb;
     kb.format_version = 3;
+    kb.arch = idr::kb::Arch::x64;
     kb.vendor = "IDR Reborn";
+    kb.vendor_code = 7;
     kb.compiler_version = 7;
     kb.compiler_id = "Delphi 7";
     kb.pointer_size = 4;
@@ -122,6 +124,13 @@ TEST(KbV3, round_trips_dump_and_args_byte_exact) {
     EXPECT_EQ(opened.value().format_version(), 3u);
 
     const auto& data = opened.value().data();
+    // Header fields must round-trip, including the architecture/vendor bytes
+    // that used to be written reserved and discarded on read (spec 6.1/6.2).
+    EXPECT_EQ(data.arch, idr::kb::Arch::x64);
+    EXPECT_EQ(data.vendor_code, 7u);
+    EXPECT_EQ(data.vendor, "IDR Reborn");
+    EXPECT_EQ(data.compiler_version, 7);
+    EXPECT_EQ(data.compiler_id, "Delphi 7");
     ASSERT_EQ(data.procs.size(), 1u);
     const auto& proc = data.procs[0];
     EXPECT_EQ(proc.name, "StringCopy");
@@ -189,6 +198,50 @@ TEST(KbV3, rejects_unsupported_version) {
     auto opened = KnowledgeBase::open(path);
     ASSERT_FALSE(opened.has_value());
     EXPECT_EQ(opened.error(), idr::ErrorCode::unsupported_version);
+
+    fs::remove(path);
+}
+
+TEST(KbV3, zero_reserved_arch_reads_as_unknown) {
+    // A v3 file whose architecture byte is the old reserved 0 must still read;
+    // 0 maps to Arch::unknown rather than being rejected.
+    KbData kb = make_sample_kb();
+    kb.arch = idr::kb::Arch::unknown;
+    kb.vendor_code = 0;
+    auto path = temp_path("unknownarch");
+    ASSERT_TRUE(idr::kb::write_v3(path, kb).has_value());
+
+    auto opened = KnowledgeBase::open(path);
+    ASSERT_TRUE(opened.has_value()) << opened.message();
+    EXPECT_EQ(opened.value().data().arch, idr::kb::Arch::unknown);
+    EXPECT_EQ(opened.value().data().vendor_code, 0u);
+
+    fs::remove(path);
+}
+
+TEST(KbV3, checksum_mismatch_reports_unsupported_format) {
+    KbData kb = make_sample_kb();
+    auto path = temp_path("badchecksum");
+    ASSERT_TRUE(idr::kb::write_v3(path, kb).has_value());
+
+    // Corrupt a byte inside the checksummed (directory + section) region.
+    std::vector<std::byte> bytes;
+    {
+        std::ifstream in(path, std::ios::binary | std::ios::ate);
+        ASSERT_TRUE(in);
+        const std::streamsize size = in.tellg();
+        ASSERT_GT(size, 0);
+        in.seekg(0, std::ios::beg);
+        bytes.resize(static_cast<size_t>(size));
+        in.read(reinterpret_cast<char*>(bytes.data()), size);
+        ASSERT_TRUE(in);
+    }
+    bytes.back() ^= std::byte{0xFF};
+    write_bytes(path, bytes);
+
+    auto opened = KnowledgeBase::open(path);
+    ASSERT_FALSE(opened.has_value());
+    EXPECT_EQ(opened.error(), idr::ErrorCode::unsupported_format);
 
     fs::remove(path);
 }

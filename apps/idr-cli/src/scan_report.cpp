@@ -49,6 +49,17 @@ std::string arch_name(idr::pe::Arch arch) {
     }
 }
 
+std::string vendor_name(idr::target::Vendor vendor) {
+    switch (vendor) {
+        case idr::target::Vendor::embarcadero:
+            return "embarcadero";
+        case idr::target::Vendor::fpc:
+            return "fpc";
+        default:
+            return "unknown";
+    }
+}
+
 // Appends up to `max_instructions` disassembled instructions at the entry point.
 void append_entry_code(std::ostringstream& out, const idr::pe::PeFile& pe) {
     if (pe.arch() == idr::pe::Arch::unknown) {
@@ -122,6 +133,7 @@ std::string scan_report(const std::filesystem::path& exe,
     if (detected.has_value()) {
         profile = detected.value();
         out << "delphi version: " << profile.version() << "\n";
+        out << "vendor: " << vendor_name(profile.vendor()) << "\n";
         const std::filesystem::path kb_path = kb_dir / profile.kb_file_name();
         const bool loaded = idr::kb::KnowledgeBase::open(kb_path).has_value();
         out << "kb: " << profile.kb_file_name() << (loaded ? " (loaded)" : " (missing)")
@@ -129,6 +141,7 @@ std::string scan_report(const std::filesystem::path& exe,
     } else {
         profile = idr::target::TargetProfile::of(idr::target::Vendor::unknown, 0, pe.arch());
         out << "delphi version: unknown\n";
+        out << "vendor: unknown\n";
         out << "kb: none\n";
     }
 

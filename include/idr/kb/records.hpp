@@ -61,9 +61,22 @@ struct ModuleRecord {
     std::vector<uint16_t> uses_ids;
 };
 
+// Target architecture recorded in the v3 header. This mirrors `idr::pe::Arch`
+// but is declared here so the KB layer stays independent of the PE layer. The
+// wire value is the byte stored in the header; `unknown` (0) is also what a v3
+// file written before this field was populated carries, so such files still
+// read back (as unknown).
+enum class Arch : uint8_t {
+    unknown = 0,
+    x86 = 1,
+    x64 = 2,
+};
+
 struct KbData {
     uint32_t format_version = 0;
+    Arch arch = Arch::unknown;  // v3 header: target architecture
     std::string vendor;
+    uint8_t vendor_code = 0;  // v3 header: vendor discriminator
     int32_t compiler_version = 0;
     std::string compiler_id;
     uint8_t pointer_size = 0;
