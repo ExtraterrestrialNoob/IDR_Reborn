@@ -50,9 +50,18 @@ inline uint64_t get_u64(const std::vector<std::byte>& v, size_t off) {
     return x;
 }
 
+inline uint32_t align_up(uint32_t value, uint32_t alignment) {
+    if (alignment == 0) {
+        return value;
+    }
+    const uint32_t remainder = value % alignment;
+    return remainder == 0 ? value : value + (alignment - remainder);
+}
+
 // Layout constants shared by make_minimal_pe and the directory builders.
 constexpr uint32_t kTextVa = 0x1000;
 constexpr uint32_t kTextRawOffset = 0x200;
+constexpr uint32_t kDataVa = 0x2000;  // first RVA after `.text`
 constexpr size_t kOptionalHeaderOffset = 0x58;  // DOS(0x40) + NT sig(4) + file header(20)
 
 // File offset within the single `.text` section for a given RVA.
@@ -162,6 +171,53 @@ inline std::vector<std::byte> make_minimal_pe(idr::pe::Arch arch, uint64_t image
     put_u32(b, sec_off + 0x24, 0x60000020);      // Characteristics (code/exec/read)
 
     return b;
+}
+
+// Appends a `.data` section carrying `data` verbatim to an image produced by
+// make_minimal_pe and returns the enlarged image. `.text` keeps its original
+// layout; `.data` takes the next section-aligned RVA (kDataVa) and the next
+// file-aligned raw offset, and SizeOfImage is widened to cover it. The default
+// image base matches make_minimal_pe's, so planted pointers can be written as
+// `image_base + rva`.
+//
+// `virtual_size` overrides the section's VirtualSize (0 = the payload size),
+// which leaves the tail of the raw payload present in the file but outside the
+// mapped section.
+inline std::vector<std::byte> make_pe_with_data(idr::pe::Arch arch,
+                                                const std::vector<std::byte>& data,
+                                                uint64_t image_base = 0x400000,
+                                                uint32_t virtual_size = 0) {
+    using namespace idr::pe::test_detail;
+
+    std::vector<std::byte> pe = make_minimal_pe(arch, image_base);
+    const bool is64 = pe_is_64(pe);
+    const size_t opt_off = kOptionalHeaderOffset;
+    const size_t sec_off = opt_off + (is64 ? 240u : 224u);
+
+    const uint32_t data_raw_offset = align_up(static_cast<uint32_t>(pe.size()), 0x200);
+    const uint32_t data_raw_size = align_up(static_cast<uint32_t>(data.size()), 0x200);
+    const uint32_t data_virtual_size = virtual_size != 0 ? virtual_size
+                                                         : static_cast<uint32_t>(data.size());
+
+    // Grow the file to hold the raw section and copy the payload in.
+    pe.resize(static_cast<size_t>(data_raw_offset) + data_raw_size, std::byte{0});
+    std::copy(data.begin(), data.end(), pe.begin() + data_raw_offset);
+
+    // Describe `.data` in the second section header slot (the header area is
+    // large enough for the extra 40 bytes in both PE32 and PE32+).
+    const size_t s1 = sec_off + 40;
+    std::memcpy(pe.data() + s1, ".data", 5);
+    put_u32(pe, s1 + 0x08, data_virtual_size);  // VirtualSize
+    put_u32(pe, s1 + 0x0C, kDataVa);            // VirtualAddress
+    put_u32(pe, s1 + 0x10, data_raw_size);      // SizeOfRawData
+    put_u32(pe, s1 + 0x14, data_raw_offset);    // PointerToRawData
+    put_u32(pe, s1 + 0x24, 0xC0000040);         // initialized data, read, write
+
+    // NumberOfSections and SizeOfImage.
+    put_u16(pe, 0x40 + 4 + 0x02, 2);
+    put_u32(pe, opt_off + 0x38, align_up(kDataVa + data_virtual_size, 0x1000));
+
+    return pe;
 }
 
 // Overrides the SizeOfOptionalHeader field (file-header offset +0x10) of an
