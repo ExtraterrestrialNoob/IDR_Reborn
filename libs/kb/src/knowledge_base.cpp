@@ -1,5 +1,6 @@
 #include "idr/kb/knowledge_base.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <fstream>
 #include <span>
@@ -84,6 +85,41 @@ std::optional<size_t> KnowledgeBase::find_proc(uint16_t module_id,
     for (size_t i = 0; i < data_.procs.size(); ++i) {
         if (data_.procs[i].module_id == module_id && data_.procs[i].name == name) {
             return i;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<uint32_t> KnowledgeBase::scan_code(Bytes code, uint32_t code_base,
+                                                 const ProcRecord& probe) const {
+    // Ported from MKnowledgeBase::ScanCode (KnowledgeBase.cpp:1682). The legacy
+    // walk compares the dump at every candidate offset, skipping the dump bytes
+    // marked in Relocs; Phase 0 performs the match only and applies no
+    // relocation arithmetic.
+    const size_t dump_size = probe.dump.size();
+    // An empty fingerprint matches everywhere, and one longer than the code
+    // cannot match at all; both are rejected before any byte is read.
+    if (dump_size == 0 || dump_size > code.size()) {
+        return std::nullopt;
+    }
+
+    // A dump byte is a wildcard when its relocs entry is the 0xFF marker. An
+    // entry beyond the end of relocs leaves the byte meaningful.
+    const auto is_wildcard = [&probe](size_t i) {
+        return i < probe.relocs.size() && probe.relocs[i] == std::byte{0xFF};
+    };
+
+    for (size_t offset = 0; offset + dump_size <= code.size(); ++offset) {
+        bool matched = true;
+        for (size_t i = 0; i < dump_size; ++i) {
+            if (is_wildcard(i)) continue;
+            if (probe.dump[i] != code[offset + i]) {
+                matched = false;
+                break;
+            }
+        }
+        if (matched) {
+            return code_base + static_cast<uint32_t>(offset);
         }
     }
     return std::nullopt;

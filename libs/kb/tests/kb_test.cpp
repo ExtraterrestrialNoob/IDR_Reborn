@@ -1,9 +1,12 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "idr/kb/knowledge_base.hpp"
@@ -280,4 +283,137 @@ TEST(KbLegacyV2, rejects_huge_section_count_without_allocating) {
     EXPECT_EQ(opened.error(), idr::ErrorCode::truncated);
 
     fs::remove(path);
+}
+
+// --- scan_code ------------------------------------------------------------
+
+// Writes `data` as a v3 KB and reopens it, mirroring how a scanned probe
+// arrives from a file. Returns nullopt when write/open failed.
+std::optional<KnowledgeBase> open_kb(const KbData& data, const std::string& name) {
+    const fs::path path = temp_path(name);
+    if (!idr::kb::write_v3(path, data).has_value()) return std::nullopt;
+    auto opened = KnowledgeBase::open(path);
+    fs::remove(path);
+    if (!opened.has_value()) return std::nullopt;
+    return std::optional<KnowledgeBase>(opened.value());
+}
+
+// `push ebp; mov ebp, esp; ret` — a fingerprint with no relocated bytes.
+const std::vector<std::byte> kPlainDump = {
+    std::byte{0x55}, std::byte{0x8B}, std::byte{0xEC}, std::byte{0xC3}};
+
+KbData make_proc_kb(std::string_view name, std::vector<std::byte> dump,
+                    std::vector<std::byte> relocs) {
+    KbData kb;
+    kb.format_version = 3;
+    kb.vendor = "IDR Reborn";
+    kb.compiler_version = 7;
+    kb.compiler_id = "Delphi 7";
+    kb.pointer_size = 4;
+
+    ProcRecord proc;
+    proc.module_id = 1;
+    proc.name = std::string(name);
+    proc.dump_type = 'C';
+    proc.method_kind = 'F';
+    proc.call_kind = 3;
+    proc.dump = std::move(dump);
+    proc.relocs = std::move(relocs);
+    kb.procs.push_back(std::move(proc));
+    return kb;
+}
+
+TEST(KbScanCode, returns_image_address_of_the_first_match) {
+    KbData data = make_proc_kb("RetTail", kPlainDump, {});
+    auto kb = open_kb(data, "scan_found");
+    ASSERT_TRUE(kb.has_value());
+
+    std::vector<std::byte> code(0x40, std::byte{0x90});
+    std::copy(kPlainDump.begin(), kPlainDump.end(), code.begin() + 0x20);
+    const uint32_t code_base = 0x00401000u;
+
+    const auto hit =
+        kb.value().scan_code(code, code_base, kb.value().data().procs[0]);
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(*hit, code_base + 0x20);
+}
+
+TEST(KbScanCode, no_match_returns_nullopt) {
+    KbData data = make_proc_kb("RetTail", kPlainDump, {});
+    auto kb = open_kb(data, "scan_miss");
+    ASSERT_TRUE(kb.has_value());
+
+    const std::vector<std::byte> code(0x40, std::byte{0x90});
+    const auto hit =
+        kb.value().scan_code(code, 0x00401000u, kb.value().data().procs[0]);
+    EXPECT_EQ(hit, std::nullopt);
+}
+
+TEST(KbScanCode, empty_dump_returns_nullopt) {
+    // An unguarded empty dump would match at offset 0 by definition.
+    KbData data = make_proc_kb("NoDump", {}, {});
+    auto kb = open_kb(data, "scan_emptydump");
+    ASSERT_TRUE(kb.has_value());
+
+    const auto hit =
+        kb.value().scan_code(kPlainDump, 0x00401000u, kb.value().data().procs[0]);
+    EXPECT_EQ(hit, std::nullopt);
+}
+
+TEST(KbScanCode, dump_larger_than_code_returns_nullopt) {
+    // 8 dump bytes against a 4-byte code blob must be rejected up front
+    // instead of reading past the end of `code`.
+    KbData data = make_proc_kb("TooBig", std::vector<std::byte>(8, std::byte{0x90}),
+                               {});
+    auto kb = open_kb(data, "scan_toobig");
+    ASSERT_TRUE(kb.has_value());
+
+    const std::vector<std::byte> code(4, std::byte{0x90});
+    const auto hit =
+        kb.value().scan_code(code, 0x00401000u, kb.value().data().procs[0]);
+    EXPECT_EQ(hit, std::nullopt);
+}
+
+TEST(KbScanCode, dump_spanning_all_the_code_matches_at_base) {
+    KbData data = make_proc_kb("WholeCode", kPlainDump, {});
+    auto kb = open_kb(data, "scan_exact");
+    ASSERT_TRUE(kb.has_value());
+
+    const auto hit =
+        kb.value().scan_code(kPlainDump, 0x00405000u, kb.value().data().procs[0]);
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(*hit, 0x00405000u);
+}
+
+TEST(KbScanCode, relocation_bytes_are_wildcards) {
+    // `call rel32; ret` where the rel32 is relocated: 0xFF-flagged bytes are
+    // skipped by the comparison, the fixed opcodes still have to match.
+    const std::vector<std::byte> dump = {std::byte{0xE8}, std::byte{0x00},
+                                         std::byte{0x00}, std::byte{0x00},
+                                         std::byte{0x00}, std::byte{0xC3}};
+    const std::vector<std::byte> relocs = {std::byte{0x00}, std::byte{0xFF},
+                                           std::byte{0xFF}, std::byte{0xFF},
+                                           std::byte{0xFF}, std::byte{0x00}};
+    KbData data = make_proc_kb("CallRet", dump, relocs);
+    auto kb = open_kb(data, "scan_reloc");
+    ASSERT_TRUE(kb.has_value());
+    const ProcRecord& probe = kb.value().data().procs[0];
+
+    std::vector<std::byte> code(0x30, std::byte{0x90});
+    const uint32_t code_base = 0x00402000u;
+    code[0x10 + 0] = std::byte{0xE8};
+    code[0x10 + 1] = std::byte{0xDE};
+    code[0x10 + 2] = std::byte{0xAD};
+    code[0x10 + 3] = std::byte{0xBE};
+    code[0x10 + 4] = std::byte{0xEF};
+    code[0x10 + 5] = std::byte{0xC3};
+
+    const auto hit = kb.value().scan_code(code, code_base, probe);
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(*hit, code_base + 0x10);
+
+    // Flipping a non-wildcard byte (and keeping the wildcards intact) breaks
+    // the match.
+    code[0x10 + 0] = std::byte{0xE9};
+    EXPECT_EQ(kb.value().scan_code(code, code_base, probe), std::nullopt);
 }
