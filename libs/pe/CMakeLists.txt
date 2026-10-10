@@ -1,4 +1,4 @@
-add_library(idr_pe STATIC src/image.cpp)
+add_library(idr_pe STATIC src/image.cpp src/directories.cpp)
 target_link_libraries(idr_pe PUBLIC idr_common)
 
 add_library(idr_test_support INTERFACE)

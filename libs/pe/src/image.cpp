@@ -141,6 +141,34 @@ Result<PeFile> PeFile::parse(Bytes bytes) {
         image_base = ib.value();
     }
 
+    // Data directory array (index 0 = exports, 1 = imports, ...). Only entries
+    // that fit within both the declared optional header and NumberOfRvaAndSizes
+    // are read; the rest remain zeroed (absent).
+    std::array<DataDirectory, 16> data_dirs{};
+    const size_t dd_count_off = (arch == Arch::x86) ? 0x5C : 0x6C;
+    const size_t dd_off = (arch == Arch::x86) ? 0x60 : 0x70;
+    uint32_t num_rva_sizes = 0;
+    if (sizeof_opt.value() >= dd_count_off + 4) {
+        auto n = read_u32(bytes, opt_off + dd_count_off);
+        if (n.has_value()) {
+            num_rva_sizes = n.value();
+        }
+    }
+    const size_t dd_avail = sizeof_opt.value() >= dd_off ? (sizeof_opt.value() - dd_off) / 8 : 0;
+    const size_t dd_count = std::min<size_t>({dd_avail, num_rva_sizes, data_dirs.size()});
+    for (size_t i = 0; i < dd_count; ++i) {
+        const size_t o = opt_off + dd_off + i * 8;
+        if (o + 8 > bytes.size()) {
+            break;
+        }
+        auto rva = read_u32(bytes, o);
+        auto size = read_u32(bytes, o + 4);
+        if (!rva.has_value() || !size.has_value()) {
+            break;
+        }
+        data_dirs[i] = DataDirectory{rva.value(), size.value()};
+    }
+
     // Section table.
     const size_t sec_off = opt_off + sizeof_opt.value();
     const size_t max_sections = bytes.size() / kSectionHeaderSize + 1;
@@ -186,6 +214,7 @@ Result<PeFile> PeFile::parse(Bytes bytes) {
     pe.image_base_ = image_base;
     pe.entry_point_rva_ = entry_rva.value();
     pe.sections_ = std::move(sections);
+    pe.data_directories_ = data_dirs;
     pe.buffer_ = bytes;
     return Result<PeFile>::ok(std::move(pe));
 }
@@ -214,6 +243,17 @@ Result<Bytes> PeFile::at_rva(uint32_t rva, size_t size) const {
         return Result<Bytes>::err(ErrorCode::truncated, "RVA slice extends past end of file");
     }
     return Result<Bytes>::ok(buffer_.subspan(offset.value(), size));
+}
+
+std::optional<DataDirectory> PeFile::data_directory(size_t index) const {
+    if (index >= data_directories_.size()) {
+        return std::nullopt;
+    }
+    const auto& dd = data_directories_[index];
+    if (dd.rva == 0 && dd.size == 0) {
+        return std::nullopt;
+    }
+    return dd;
 }
 
 }  // namespace idr::pe
