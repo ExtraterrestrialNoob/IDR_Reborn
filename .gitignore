@@ -1,3 +1,4 @@
 *.~*
 *.ddp
 .worktrees/
+build/
