@@ -7,7 +7,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
 
 namespace idr::target {
@@ -38,7 +37,11 @@ struct FlatImage {
 
     std::vector<std::byte> bytes;
     std::vector<Segment> segments;
-    std::vector<std::pair<uint32_t, uint32_t>> valid_ranges;  // [lo, hi)
+    // Contiguous mapped-image extent [valid_lo, valid_hi), mirroring legacy
+    // IsValidImageAdr's single `[CodeBase, CodeBase + ImageSize)` range
+    // (Misc.cpp:284) so pointers into inter-section gaps are accepted.
+    uint32_t valid_lo = 0;
+    uint32_t valid_hi = 0;
 
     std::optional<uint32_t> u32_at(size_t pos) const {
         if (pos + 4 > bytes.size()) {
@@ -71,14 +74,9 @@ struct FlatImage {
         return std::nullopt;
     }
 
-    // IsValidImageAdr (Misc.cpp:284): is `adr` inside any mapped section?
+    // IsValidImageAdr (Misc.cpp:284): is `adr` inside the mapped image?
     bool valid_image_adr(uint32_t adr) const {
-        for (const auto& [lo, hi] : valid_ranges) {
-            if (adr >= lo && adr < hi) {
-                return true;
-            }
-        }
-        return false;
+        return adr >= valid_lo && adr < valid_hi;
     }
 };
 
@@ -91,10 +89,24 @@ FlatImage build_flat_image(const pe::PeFile& image) {
     const uint32_t reloc_va =
         image.data_directory(kDirBaseReloc) ? image.data_directory(kDirBaseReloc)->rva : 0;
 
+    // The legacy valid-image range is the single extent
+    // `[CodeBase, CodeBase + SizeOfImage)` (Misc.cpp:284): it deliberately
+    // includes inter-section alignment gaps and the image tail beyond the last
+    // section's VirtualSize. Reproduce that here so a genuine D2010+ binary is
+    // not misrouted into the legacy branch.
+    const uint32_t first_va = secs.empty() ? 0 : secs.front().virtual_address;
+    const uint32_t code_base = static_cast<uint32_t>(image.image_base() + first_va);
+    uint32_t image_end = 0;
     for (const auto& sec : secs) {
-        const uint64_t lo = image.image_base() + sec.virtual_address;
-        flat.valid_ranges.emplace_back(static_cast<uint32_t>(lo),
-                                       static_cast<uint32_t>(lo + sec.virtual_size));
+        const uint64_t end = image.image_base() + sec.virtual_address + sec.virtual_size;
+        image_end = std::max(image_end, static_cast<uint32_t>(end));
+    }
+    flat.valid_lo = code_base;
+    flat.valid_hi = std::max(code_base + image.size_of_image(), image_end);
+    if (flat.valid_hi <= flat.valid_lo) {
+        // Malformed or absent SizeOfImage with no usable sections.
+        flat.valid_lo = static_cast<uint32_t>(image.image_base());
+        flat.valid_hi = std::max(image_end, flat.valid_lo + 1);
     }
 
     for (size_t i = 0; i < secs.size(); ++i) {
@@ -292,9 +304,11 @@ std::optional<uint16_t> module_id_of(const KnowledgeBase& kb, std::string_view n
 
 // The >=2010 ladder from GetDelphiVersion (Main.cpp:1537-1625): probe the
 // System unit's fingerprint functions against the flattened image, newest KB
-// first, falling back to 2010.
+// first, falling back to 2010. `kb_probed` is set when a syskb file is
+// successfully opened, so the caller can tell a real 2010 detection from the
+// no-KB fallback.
 int detect_extended(const FlatImage& flat,
-                    const std::filesystem::path& sys_kb_dir) {
+                    const std::filesystem::path& sys_kb_dir, bool& kb_probed) {
     if (flat.segments.empty()) {
         return 2010;
     }
@@ -318,6 +332,7 @@ int detect_extended(const FlatImage& flat,
         if (!kb.has_value()) {
             continue;
         }
+        kb_probed = true;
         auto module = module_id_of(kb.value(), "System");
         if (!module.has_value()) {
             continue;
@@ -458,9 +473,12 @@ Result<TargetProfile> detect_embarcadero(const pe::PeFile& image,
                                          const std::filesystem::path& sys_kb_dir) {
     const FlatImage flat = build_flat_image(image);
     if (is_extended_init_tab(flat)) {
-        const int version = detect_extended(flat, sys_kb_dir);
-        return Result<TargetProfile>::ok(
-            TargetProfile::of(Vendor::embarcadero, version, image.arch()));
+        bool kb_probed = false;
+        const int version = detect_extended(flat, sys_kb_dir, kb_probed);
+        TargetProfile profile =
+            TargetProfile::of(Vendor::embarcadero, version, image.arch());
+        profile.kb_probed_ = kb_probed;
+        return Result<TargetProfile>::ok(profile);
     }
     if (auto version = detect_legacy_version(flat); version.has_value()) {
         return Result<TargetProfile>::ok(

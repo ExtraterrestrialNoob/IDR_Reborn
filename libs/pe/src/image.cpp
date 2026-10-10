@@ -141,6 +141,15 @@ Result<PeFile> PeFile::parse(Bytes bytes) {
         image_base = ib.value();
     }
 
+    // SizeOfImage (+0x38). Used by callers that need the mapped image extent.
+    uint32_t size_of_image = 0;
+    if (sizeof_opt.value() >= 0x38 + 4) {
+        auto soi = read_u32(bytes, opt_off + 0x38);
+        if (soi.has_value()) {
+            size_of_image = soi.value();
+        }
+    }
+
     // Data directory array (index 0 = exports, 1 = imports, ...). Only entries
     // that fit within both the declared optional header and NumberOfRvaAndSizes
     // are read; the rest remain zeroed (absent).
@@ -213,6 +222,7 @@ Result<PeFile> PeFile::parse(Bytes bytes) {
     pe.arch_ = arch;
     pe.image_base_ = image_base;
     pe.entry_point_rva_ = entry_rva.value();
+    pe.size_of_image_ = size_of_image;
     pe.sections_ = std::move(sections);
     pe.data_directories_ = data_dirs;
     pe.buffer_ = bytes;

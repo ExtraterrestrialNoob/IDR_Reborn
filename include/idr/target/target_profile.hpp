@@ -56,6 +56,12 @@ public:
     std::size_t pointer_size() const { return pointer_size_; }
     const VmtLayout& vmt() const { return vmt_; }
 
+    // True when detection actually opened and scanned at least one syskb*.bin
+    // during the >=2010 ladder. It distinguishes a real 2010 detection from the
+    // 2010 fallback taken because no KB could be opened (a mis-configured or
+    // empty `sys_kb_dir`). Always false for `of()`.
+    bool kb_probed() const { return kb_probed_; }
+
     // `"kb" + std::to_string(version()) + ".bin"`.
     std::string kb_file_name() const;
 
@@ -69,11 +75,15 @@ public:
     static Result<TargetProfile> detect(const pe::PeFile& image,
                                         const std::filesystem::path& sys_kb_dir);
 
+    friend Result<TargetProfile> detect_embarcadero(
+        const pe::PeFile& image, const std::filesystem::path& sys_kb_dir);
+
 private:
     Vendor vendor_ = Vendor::unknown;
     int version_ = 0;
     pe::Arch arch_ = pe::Arch::unknown;
     std::size_t pointer_size_ = 4;
+    bool kb_probed_ = false;
     VmtLayout vmt_{};
 };
 

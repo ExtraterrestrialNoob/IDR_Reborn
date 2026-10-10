@@ -36,6 +36,9 @@ public:
     bool is_64() const { return arch_ == Arch::x64; }
     uint64_t image_base() const { return image_base_; }
     uint32_t entry_point_rva() const { return entry_point_rva_; }
+    // SizeOfImage from the optional header, or 0 when the header omits or
+    // truncates the field.
+    uint32_t size_of_image() const { return size_of_image_; }
     const std::vector<Section>& sections() const { return sections_; }
 
     std::optional<uint32_t> rva_to_offset(uint32_t rva) const;
@@ -50,6 +53,7 @@ private:
     Arch arch_ = Arch::unknown;
     uint64_t image_base_ = 0;
     uint32_t entry_point_rva_ = 0;
+    uint32_t size_of_image_ = 0;
     std::vector<Section> sections_;
     std::array<DataDirectory, 16> data_directories_{};
     Bytes buffer_;

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <optional>
 #include <vector>
@@ -35,12 +36,38 @@ void plant_u32(std::vector<std::byte>& pe, uint32_t pos, uint32_t value) {
 
 // Plants the >=2010 "extended init table" pattern that the IsExtendedInitTab
 // equivalent recognizes: at flattened position `i` a word equal to
-// Pos2Adr(i) + 20, preceded by a unit count of 1 and followed by a single
-// {init = 0, finalize = 0} entry.
+// Pos2Adr(i) + 20, preceded by a unit count and followed by one
+// {init = ini_adr, finalize = 0} entry per address. `at` is the `i` the table
+// base is planted at.
 void plant_extended_init_table(std::vector<std::byte>& pe, uint32_t image_base,
-                               uint32_t i = 0x10) {
-    plant_u32(pe, i - 4, 1);
-    plant_u32(pe, i, image_base + kTextRva + i + 20);
+                               uint32_t at = 0x10,
+                               std::vector<uint32_t> ini_addrs = {0}) {
+    plant_u32(pe, at - 4, static_cast<uint32_t>(ini_addrs.size()));
+    plant_u32(pe, at, image_base + kTextRva + at + 20);
+    for (size_t k = 0; k < ini_addrs.size(); ++k) {
+        plant_u32(pe, at + 20 + static_cast<uint32_t>(k * 8), ini_addrs[k]);
+        plant_u32(pe, at + 24 + static_cast<uint32_t>(k * 8), 0);
+    }
+}
+
+// Appends a second, raw-size-zero `.data` section to an x86 image produced by
+// make_minimal_pe and widens SizeOfImage. Leaves [previous_end, va) as an
+// inter-section gap.
+void add_empty_section(std::vector<std::byte>& pe, uint32_t va, uint32_t vsize,
+                       uint32_t size_of_image) {
+    constexpr size_t kFileHeaderOff = 0x44;   // DOS(0x40) + "PE\0\0"(4)
+    constexpr size_t kOptOff = 0x58;          // kFileHeaderOff + IMAGE_FILE_HEADER(20)
+    constexpr size_t kSecTableOff = 0x138;    // kOptOff + 224 (PE32 optional header)
+    idr::pe::test_detail::put_u16(pe, kFileHeaderOff + 0x02, 2);  // NumberOfSections
+    idr::pe::test_detail::put_u32(pe, kOptOff + 0x38, size_of_image);
+
+    const size_t s1 = kSecTableOff + 40;
+    std::memcpy(pe.data() + s1, ".data", 5);
+    idr::pe::test_detail::put_u32(pe, s1 + 0x08, vsize);
+    idr::pe::test_detail::put_u32(pe, s1 + 0x0C, va);
+    idr::pe::test_detail::put_u32(pe, s1 + 0x10, 0);  // SizeOfRawData
+    idr::pe::test_detail::put_u32(pe, s1 + 0x14, 0);  // PointerToRawData
+    idr::pe::test_detail::put_u32(pe, s1 + 0x24, 0xC0000040);
 }
 
 fs::path no_kb_dir() {
@@ -197,6 +224,59 @@ TEST(TargetDetect, extended_init_table_falls_back_to_2010) {
     EXPECT_EQ(detected.value().arch(), Arch::x86);
     EXPECT_EQ(detected.value().pointer_size(), 4u);
     EXPECT_EQ(detected.value().kb_file_name(), "kb2010.bin");
+    // The 2010 fallback with no KBs found must be reported as unprobed.
+    EXPECT_FALSE(detected.value().kb_probed());
+}
+
+// Important 1: the valid-image range must cover inter-section gaps, exactly as
+// legacy `[CodeBase, CodeBase + SizeOfImage)` does. A D2010+ table whose entry
+// points into the gap must still be recognized (route to the >=2010 ladder),
+// not fall through to the legacy branch.
+TEST(TargetDetect, accepts_init_table_entry_in_inter_section_gap) {
+    const uint32_t image_base = kDefaultImageBase;
+    auto bytes = make_minimal_pe(Arch::x86, image_base);
+    // .text is [0x1000, 0x2000); the new .data section is [0x3000, 0x4000), so
+    // [0x2000, 0x3000) is an inter-section gap and [0x4000, 0x5000) is the
+    // image tail past the last section's VirtualSize (both within SizeOfImage).
+    add_empty_section(bytes, /*va=*/0x3000, /*vsize=*/0x1000, /*size_of_image=*/0x4000);
+
+    const uint32_t gap_adr = image_base + 0x2500;
+    const uint32_t tail_adr = image_base + 0x4500;
+    plant_extended_init_table(bytes, image_base, /*at=*/0x10,
+                              /*ini_addrs=*/{gap_adr, tail_adr});
+
+    auto pe = PeFile::parse(bytes);
+    ASSERT_TRUE(pe.has_value());
+    EXPECT_EQ(pe.value().size_of_image(), 0x4000u);
+
+    auto detected = TargetProfile::detect(pe.value(), no_kb_dir());
+    ASSERT_TRUE(detected.has_value())
+        << "gap/tail pointer rejected: routed to the legacy branch";
+    EXPECT_EQ(detected.value().version(), 2010);
+    EXPECT_FALSE(detected.value().kb_probed());
+}
+
+// Important 2 / R9: with real syskb files present but no matching fingerprint,
+// the 2010 fallback must be reported as probed.
+TEST(TargetDetect, real_kb_dir_reports_probed_on_2010_fallback) {
+    const fs::path sys_kb_dir = fs::path(IDR_REPO_ROOT);
+    if (!fs::exists(sys_kb_dir / "syskb2014.bin")) {
+        GTEST_SKIP() << "no syskb2014.bin fixture";
+    }
+
+    auto bytes = make_minimal_pe(Arch::x86, kDefaultImageBase);
+    // Fill the code bytes with INT3 so no System fingerprint can match; only
+    // the presence of the KBs should be reported.
+    std::fill(bytes.begin() + static_cast<std::ptrdiff_t>(kTextRawOffset), bytes.end(),
+              std::byte{0xCC});
+    plant_extended_init_table(bytes, kDefaultImageBase);
+    auto pe = PeFile::parse(bytes);
+    ASSERT_TRUE(pe.has_value());
+
+    auto detected = TargetProfile::detect(pe.value(), sys_kb_dir);
+    ASSERT_TRUE(detected.has_value()) << detected.message();
+    EXPECT_EQ(detected.value().version(), 2010);
+    EXPECT_TRUE(detected.value().kb_probed());
 }
 
 TEST(TargetDetect, real_syskb2014_fingerprint_detects_2014) {
@@ -238,4 +318,9 @@ TEST(TargetDetect, real_syskb2014_fingerprint_detects_2014) {
     ASSERT_TRUE(detected.has_value()) << detected.message();
     EXPECT_EQ(detected.value().version(), 2014);
     EXPECT_EQ(detected.value().arch(), Arch::x86);
+    EXPECT_TRUE(detected.value().kb_probed());
+}
+
+TEST(TargetProfile, of_reports_unprobed) {
+    EXPECT_FALSE(TargetProfile::of(Vendor::embarcadero, 2014, Arch::x86).kb_probed());
 }
