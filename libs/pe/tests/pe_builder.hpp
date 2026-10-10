@@ -94,3 +94,11 @@ inline std::vector<std::byte> make_minimal_pe(idr::pe::Arch arch, uint64_t image
 
     return b;
 }
+
+// Overrides the SizeOfOptionalHeader field (file-header offset +0x10) of an
+// image produced by make_minimal_pe, for tests exercising malformed sizes.
+inline void set_size_of_optional_header(std::vector<std::byte>& pe, uint16_t size) {
+    using namespace idr::pe::test_detail;
+    // DOS header (0x40) + NT signature (4) + file-header offset 0x10.
+    put_u16(pe, 0x40 + 4 + 0x10, size);
+}

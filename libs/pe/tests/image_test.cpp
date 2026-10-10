@@ -44,3 +44,13 @@ TEST(PeFile, non_pe_is_rejected) {
     ASSERT_FALSE(pe.has_value());
     EXPECT_EQ(pe.error(), idr::ErrorCode::bad_magic);
 }
+
+TEST(PeFile, undersized_optional_header_is_rejected) {
+    auto bytes = make_minimal_pe(idr::pe::Arch::x86);
+    // Declare an optional header too small to contain AddressOfEntryPoint/ImageBase,
+    // while keeping the buffer large enough so only the size check can reject it.
+    set_size_of_optional_header(bytes, 0x10);
+    auto pe = idr::pe::PeFile::parse(bytes);
+    ASSERT_FALSE(pe.has_value());
+    EXPECT_EQ(pe.error(), idr::ErrorCode::unsupported_format);
+}

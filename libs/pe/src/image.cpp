@@ -48,6 +48,9 @@ constexpr uint16_t kOptMagic64 = 0x20B;  // PE32+
 constexpr size_t kDosHeaderSize = 0x40;
 constexpr size_t kFileHeaderSize = 20;
 constexpr size_t kSectionHeaderSize = 40;
+// Smallest optional header that still contains the fields we read:
+// AddressOfEntryPoint (+0x10) and ImageBase (+0x1C PE32 / +0x18 PE32+).
+constexpr size_t kMinOptionalHeaderSize = 0x20;
 
 }  // namespace
 
@@ -104,6 +107,13 @@ Result<PeFile> PeFile::parse(Bytes bytes) {
         default:
             return Result<PeFile>::err(ErrorCode::unsupported_format,
                                        "unrecognized optional header magic");
+    }
+
+    // The declared optional-header size must be large enough to contain the
+    // fields read below, or a malformed PE would silently parse with garbage.
+    if (sizeof_opt.value() < kMinOptionalHeaderSize) {
+        return Result<PeFile>::err(ErrorCode::unsupported_format,
+                                   "optional header smaller than minimum");
     }
 
     // The whole optional header (as declared by SizeOfOptionalHeader) must fit.
