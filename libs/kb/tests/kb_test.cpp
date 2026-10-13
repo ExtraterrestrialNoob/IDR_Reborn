@@ -13,11 +13,14 @@
 
 namespace fs = std::filesystem;
 using idr::kb::ArgRecord;
+using idr::kb::ConstRecord;
 using idr::kb::KnowledgeBase;
 using idr::kb::KbData;
 using idr::kb::ModuleRecord;
 using idr::kb::ProcRecord;
+using idr::kb::ResStringRecord;
 using idr::kb::TypeRecord;
+using idr::kb::VarRecord;
 
 namespace {
 
@@ -51,7 +54,7 @@ KbData make_sample_kb() {
                  std::byte{0xC2}, std::byte{0x08}, std::byte{0x00}};
     proc.relocs = {std::byte{0x00}, std::byte{0x00}, std::byte{0xFF},
                    std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
-    proc.fixups = {0x00000004, 0x00000008};
+    proc.fixups = {std::byte{0x04}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
 
     ArgRecord a1;
     a1.tag = 0x22;
@@ -469,4 +472,94 @@ TEST(KbScanCode, relocation_bytes_are_wildcards) {
     // the match.
     code[0x10 + 0] = std::byte{0xE9};
     EXPECT_EQ(kb.value().scan_code(code, code_base, probe), std::nullopt);
+}
+
+TEST(KbV3, round_trips_all_sections_and_raw_fields) {
+    KbData kb;
+    kb.arch = idr::kb::Arch::x86;
+    kb.vendor = "embarcadero";
+    kb.vendor_code = 1;
+    kb.compiler_version = 2014;
+    kb.compiler_id = "XE4";
+    kb.pointer_size = 4;
+
+    ModuleRecord m;
+    m.id = 1; m.name = "System"; m.filename = "System.dcu";
+    m.uses_ids = {0xFFFF, 2};
+    m.uses_names = {"kernel32.dll", "System"};
+    kb.modules.push_back(m);
+
+    ConstRecord c;
+    c.module_id = 1; c.name = "c1"; c.type = 'C';
+    c.type_def = "Integer"; c.value = "1";
+    c.dump = {std::byte{0xAA}}; c.relocs = {std::byte{0x00}};
+    c.fixups = {std::byte{0x41}, std::byte{0x04}, std::byte{0x00}};
+    kb.consts.push_back(c);
+
+    TypeRecord t;
+    t.module_id = 1; t.name = "T"; t.kind = 'F'; t.vmt_count = 2;
+    t.decl = "T = class"; t.dump = {std::byte{0x01}}; t.relocs = {std::byte{0x00}};
+    t.fixups = {std::byte{0x44}};
+    t.fields = {std::byte{0x01}, std::byte{0x00}};
+    t.props = {std::byte{0x00}, std::byte{0x00}};
+    t.methods = {std::byte{0x01}, std::byte{0x00}};
+    kb.types.push_back(t);
+
+    VarRecord v;
+    v.module_id = 1; v.name = "g"; v.type = 'V'; v.type_def = "Integer"; v.abs_name = "";
+    kb.vars.push_back(v);
+
+    ResStringRecord rs;
+    rs.module_id = 1; rs.name = "s"; rs.type_def = "string"; rs.context = "System";
+    kb.resstrings.push_back(rs);
+
+    ProcRecord p;
+    p.module_id = 1; p.name = "F"; p.dump_type = 'C'; p.method_kind = 'F'; p.call_kind = 3;
+    p.result_type = "Integer";
+    p.dump = {std::byte{0x55}}; p.relocs = {std::byte{0x00}};
+    p.fixups = {std::byte{0x41}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+    p.locals = {std::byte{0x00}, std::byte{0x00}};
+    kb.procs.push_back(p);
+
+    const auto path = temp_path("allroundtrip");
+    ASSERT_TRUE(idr::kb::write_v3(path, kb).has_value());
+    auto opened = KnowledgeBase::open(path);
+    ASSERT_TRUE(opened.has_value()) << opened.message();
+
+    KbData expected = kb;
+    expected.format_version = 3;  // write_v3 always emits v3
+    EXPECT_TRUE(idr::kb::kb_equal(expected, opened.value().data()));
+    EXPECT_EQ(opened.value().data().vars.size(), 1u);
+    EXPECT_EQ(opened.value().data().resstrings.size(), 1u);
+    fs::remove(path);
+}
+
+TEST(KbV3, kb_equal_detects_a_field_difference) {
+    KbData a;
+    a.procs.push_back(ProcRecord{});
+    a.procs[0].name = "A";
+    KbData b = a;
+    EXPECT_TRUE(idr::kb::kb_equal(a, b));
+    b.procs[0].name = "B";
+    EXPECT_FALSE(idr::kb::kb_equal(a, b));
+}
+
+TEST(KbV3, write_read_write_is_byte_identical) {
+    KbData kb = make_sample_kb();
+    const auto p1 = temp_path("det1");
+    ASSERT_TRUE(idr::kb::write_v3(p1, kb).has_value());
+    auto opened = KnowledgeBase::open(p1);
+    ASSERT_TRUE(opened.has_value());
+    const auto p2 = temp_path("det2");
+    ASSERT_TRUE(idr::kb::write_v3(p2, opened.value().data()).has_value());
+
+    auto read_all = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary | std::ios::ate);
+        std::vector<std::byte> v(static_cast<size_t>(in.tellg()));
+        in.seekg(0);
+        in.read(reinterpret_cast<char*>(v.data()), static_cast<std::streamsize>(v.size()));
+        return v;
+    };
+    EXPECT_EQ(read_all(p1), read_all(p2));
+    fs::remove(p1); fs::remove(p2);
 }

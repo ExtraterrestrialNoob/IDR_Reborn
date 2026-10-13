@@ -27,7 +27,8 @@ struct ProcRecord {
     std::string result_type;
     std::vector<std::byte> dump;
     std::vector<std::byte> relocs;
-    std::vector<uint32_t> fixups;
+    std::vector<std::byte> fixups;
+    std::vector<std::byte> locals;
     std::vector<ArgRecord> args;
 };
 
@@ -39,6 +40,7 @@ struct ConstRecord {
     std::string value;
     std::vector<std::byte> dump;
     std::vector<std::byte> relocs;
+    std::vector<std::byte> fixups;
 };
 
 struct TypeRecord {
@@ -49,9 +51,30 @@ struct TypeRecord {
     std::string decl;
     std::vector<std::byte> dump;
     std::vector<std::byte> relocs;
+    std::vector<std::byte> fixups;
     std::vector<std::byte> fields;
     std::vector<std::byte> props;
     std::vector<std::byte> methods;
+};
+
+// A global/specialized/thread variable. `type` is 'V' (var), 'A' (absolute
+// var), 'S' (specialized var), or 'T' (threadvar); `abs_name` is the target of
+// an `absolute` declaration (empty otherwise).
+struct VarRecord {
+    uint16_t module_id = 0;
+    std::string name;
+    char type = 0;
+    std::string type_def;
+    std::string abs_name;
+};
+
+// A typed-constant / resource-string entry. `context` is the enclosing unit
+// name; it is empty when the source record carries none.
+struct ResStringRecord {
+    uint16_t module_id = 0;
+    std::string name;
+    std::string type_def;
+    std::string context;
 };
 
 struct ModuleRecord {
@@ -59,6 +82,7 @@ struct ModuleRecord {
     std::string name;
     std::string filename;
     std::vector<uint16_t> uses_ids;
+    std::vector<std::string> uses_names;
 };
 
 // Target architecture recorded in the v3 header. This mirrors `idr::pe::Arch`
@@ -83,7 +107,15 @@ struct KbData {
     std::vector<ModuleRecord> modules;
     std::vector<ConstRecord> consts;
     std::vector<TypeRecord> types;
+    std::vector<VarRecord> vars;
+    std::vector<ResStringRecord> resstrings;
     std::vector<ProcRecord> procs;
 };
+
+// Structural equality over the *content* of two knowledge bases: the shared
+// header fields and every record field, including opaque blobs. It
+// deliberately does NOT compare `format_version`, because a v2->v3 conversion
+// legitimately changes the container version while preserving content.
+bool kb_equal(const KbData& a, const KbData& b);
 
 }  // namespace idr::kb

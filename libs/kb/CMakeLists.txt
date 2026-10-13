@@ -1,4 +1,5 @@
 add_library(idr_kb STATIC
+  src/kb_equal.cpp
   src/knowledge_base.cpp
   src/v3_io.cpp
   src/v2_read.cpp)

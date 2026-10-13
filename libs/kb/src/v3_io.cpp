@@ -20,7 +20,9 @@ constexpr uint32_t kSectionModules = 1;
 constexpr uint32_t kSectionConsts = 2;
 constexpr uint32_t kSectionTypes = 3;
 constexpr uint32_t kSectionProcs = 4;
-constexpr uint32_t kSectionCount = 4;
+constexpr uint32_t kSectionVars = 5;
+constexpr uint32_t kSectionResStrings = 6;
+constexpr uint32_t kSectionCount = 6;
 
 constexpr size_t kSectionDirEntrySize = 24;  // u32 id + u32 count + u64 off + u64 size
 
@@ -46,6 +48,10 @@ void write_module_body(Writer& w, const ModuleRecord& m) {
     for (uint16_t id : m.uses_ids) {
         w.u16(id);
     }
+    w.u32(static_cast<uint32_t>(m.uses_names.size()));
+    for (const std::string& name : m.uses_names) {
+        w.string(name);
+    }
 }
 
 void write_const_body(Writer& w, const ConstRecord& c) {
@@ -58,6 +64,8 @@ void write_const_body(Writer& w, const ConstRecord& c) {
     w.bytes(c.dump);
     w.u32(static_cast<uint32_t>(c.relocs.size()));
     w.bytes(c.relocs);
+    w.u32(static_cast<uint32_t>(c.fixups.size()));
+    w.bytes(c.fixups);
 }
 
 void write_type_body(Writer& w, const TypeRecord& t) {
@@ -70,12 +78,29 @@ void write_type_body(Writer& w, const TypeRecord& t) {
     w.bytes(t.dump);
     w.u32(static_cast<uint32_t>(t.relocs.size()));
     w.bytes(t.relocs);
+    w.u32(static_cast<uint32_t>(t.fixups.size()));
+    w.bytes(t.fixups);
     w.u32(static_cast<uint32_t>(t.fields.size()));
     w.bytes(t.fields);
     w.u32(static_cast<uint32_t>(t.props.size()));
     w.bytes(t.props);
     w.u32(static_cast<uint32_t>(t.methods.size()));
     w.bytes(t.methods);
+}
+
+void write_var_body(Writer& w, const VarRecord& v) {
+    w.u16(v.module_id);
+    w.string(v.name);
+    w.u8(static_cast<uint8_t>(v.type));
+    w.string(v.type_def);
+    w.string(v.abs_name);
+}
+
+void write_resstring_body(Writer& w, const ResStringRecord& r) {
+    w.u16(r.module_id);
+    w.string(r.name);
+    w.string(r.type_def);
+    w.string(r.context);
 }
 
 void write_proc_body(Writer& w, const ProcRecord& p) {
@@ -92,9 +117,9 @@ void write_proc_body(Writer& w, const ProcRecord& p) {
     w.u32(static_cast<uint32_t>(p.relocs.size()));
     w.bytes(p.relocs);
     w.u32(static_cast<uint32_t>(p.fixups.size()));
-    for (uint32_t f : p.fixups) {
-        w.u32(f);
-    }
+    w.bytes(p.fixups);
+    w.u32(static_cast<uint32_t>(p.locals.size()));
+    w.bytes(p.locals);
     w.u32(static_cast<uint32_t>(p.args.size()));
     for (const ArgRecord& a : p.args) {
         write_arg(w, a);
@@ -146,6 +171,28 @@ std::vector<std::byte> serialize_section(uint32_t id, const KbData& data,
                 write_proc_body(body, p);
                 w.u32(static_cast<uint32_t>(1 + body.data().size()));
                 w.u8(static_cast<uint8_t>(kSectionProcs));
+                w.bytes(body.data());
+            }
+            break;
+        }
+        case kSectionVars: {
+            count = data.vars.size();
+            for (const auto& v : data.vars) {
+                Writer body;
+                write_var_body(body, v);
+                w.u32(static_cast<uint32_t>(1 + body.data().size()));
+                w.u8(static_cast<uint8_t>(kSectionVars));
+                w.bytes(body.data());
+            }
+            break;
+        }
+        case kSectionResStrings: {
+            count = data.resstrings.size();
+            for (const auto& rs : data.resstrings) {
+                Writer body;
+                write_resstring_body(body, rs);
+                w.u32(static_cast<uint32_t>(1 + body.data().size()));
+                w.u8(static_cast<uint8_t>(kSectionResStrings));
                 w.bytes(body.data());
             }
             break;
@@ -206,6 +253,18 @@ Result<ModuleRecord> read_module(Reader& r) {
         if (!use.has_value()) return Result<ModuleRecord>::err(use.error(), use.message());
         m.uses_ids.push_back(use.value());
     }
+
+    auto nn = r.u32();
+    if (!nn.has_value()) return Result<ModuleRecord>::err(nn.error(), nn.message());
+    if (nn.value() > r.remaining() / 4) {  // each use name is at least a u32 length
+        return Result<ModuleRecord>::err(ErrorCode::truncated, "module use name count out of range");
+    }
+    m.uses_names.reserve(nn.value());
+    for (uint32_t i = 0; i < nn.value(); ++i) {
+        auto uname = r.string();
+        if (!uname.has_value()) return Result<ModuleRecord>::err(uname.error(), uname.message());
+        m.uses_names.push_back(std::move(uname.value()));
+    }
     return Result<ModuleRecord>::ok(std::move(m));
 }
 
@@ -229,6 +288,10 @@ Result<ConstRecord> read_const(Reader& r) {
     if (!rsz.has_value()) return Result<ConstRecord>::err(rsz.error(), rsz.message());
     auto relocs = r.bytes(rsz.value());
     if (!relocs.has_value()) return Result<ConstRecord>::err(relocs.error(), relocs.message());
+    auto fsz = r.u32();
+    if (!fsz.has_value()) return Result<ConstRecord>::err(fsz.error(), fsz.message());
+    auto fixups = r.bytes(fsz.value());
+    if (!fixups.has_value()) return Result<ConstRecord>::err(fixups.error(), fixups.message());
 
     c.module_id = mod.value();
     c.name = std::move(name.value());
@@ -237,6 +300,7 @@ Result<ConstRecord> read_const(Reader& r) {
     c.value = std::move(value.value());
     c.dump = std::move(dump.value());
     c.relocs = std::move(relocs.value());
+    c.fixups = std::move(fixups.value());
     return Result<ConstRecord>::ok(std::move(c));
 }
 
@@ -261,6 +325,10 @@ Result<TypeRecord> read_type(Reader& r) {
     if (!rsz.has_value()) return Result<TypeRecord>::err(rsz.error(), rsz.message());
     auto relocs = r.bytes(rsz.value());
     if (!relocs.has_value()) return Result<TypeRecord>::err(relocs.error(), relocs.message());
+    auto xsz = r.u32();
+    if (!xsz.has_value()) return Result<TypeRecord>::err(xsz.error(), xsz.message());
+    auto fixups = r.bytes(xsz.value());
+    if (!fixups.has_value()) return Result<TypeRecord>::err(fixups.error(), fixups.message());
     auto fsz = r.u32();
     if (!fsz.has_value()) return Result<TypeRecord>::err(fsz.error(), fsz.message());
     auto fields = r.bytes(fsz.value());
@@ -281,10 +349,50 @@ Result<TypeRecord> read_type(Reader& r) {
     t.decl = std::move(decl.value());
     t.dump = std::move(dump.value());
     t.relocs = std::move(relocs.value());
+    t.fixups = std::move(fixups.value());
     t.fields = std::move(fields.value());
     t.props = std::move(props.value());
     t.methods = std::move(methods.value());
     return Result<TypeRecord>::ok(std::move(t));
+}
+
+Result<VarRecord> read_var(Reader& r) {
+    VarRecord v;
+    auto mod = r.u16();
+    if (!mod.has_value()) return Result<VarRecord>::err(mod.error(), mod.message());
+    auto name = r.string();
+    if (!name.has_value()) return Result<VarRecord>::err(name.error(), name.message());
+    auto type = r.u8();
+    if (!type.has_value()) return Result<VarRecord>::err(type.error(), type.message());
+    auto tdef = r.string();
+    if (!tdef.has_value()) return Result<VarRecord>::err(tdef.error(), tdef.message());
+    auto abs = r.string();
+    if (!abs.has_value()) return Result<VarRecord>::err(abs.error(), abs.message());
+
+    v.module_id = mod.value();
+    v.name = std::move(name.value());
+    v.type = static_cast<char>(type.value());
+    v.type_def = std::move(tdef.value());
+    v.abs_name = std::move(abs.value());
+    return Result<VarRecord>::ok(std::move(v));
+}
+
+Result<ResStringRecord> read_resstring(Reader& r) {
+    ResStringRecord rs;
+    auto mod = r.u16();
+    if (!mod.has_value()) return Result<ResStringRecord>::err(mod.error(), mod.message());
+    auto name = r.string();
+    if (!name.has_value()) return Result<ResStringRecord>::err(name.error(), name.message());
+    auto tdef = r.string();
+    if (!tdef.has_value()) return Result<ResStringRecord>::err(tdef.error(), tdef.message());
+    auto ctx = r.string();
+    if (!ctx.has_value()) return Result<ResStringRecord>::err(ctx.error(), ctx.message());
+
+    rs.module_id = mod.value();
+    rs.name = std::move(name.value());
+    rs.type_def = std::move(tdef.value());
+    rs.context = std::move(ctx.value());
+    return Result<ResStringRecord>::ok(std::move(rs));
 }
 
 Result<ProcRecord> read_proc(Reader& r) {
@@ -316,11 +424,12 @@ Result<ProcRecord> read_proc(Reader& r) {
     if (!relocs.has_value()) return Result<ProcRecord>::err(relocs.error(), relocs.message());
     auto fnum = r.u32();
     if (!fnum.has_value()) return Result<ProcRecord>::err(fnum.error(), fnum.message());
-    for (uint32_t i = 0; i < fnum.value(); ++i) {
-        auto f = r.u32();
-        if (!f.has_value()) return Result<ProcRecord>::err(f.error(), f.message());
-        p.fixups.push_back(f.value());
-    }
+    auto fixups = r.bytes(fnum.value());
+    if (!fixups.has_value()) return Result<ProcRecord>::err(fixups.error(), fixups.message());
+    auto lnum = r.u32();
+    if (!lnum.has_value()) return Result<ProcRecord>::err(lnum.error(), lnum.message());
+    auto locals = r.bytes(lnum.value());
+    if (!locals.has_value()) return Result<ProcRecord>::err(locals.error(), locals.message());
     auto anum = r.u32();
     if (!anum.has_value()) return Result<ProcRecord>::err(anum.error(), anum.message());
     // Smallest arg: tag(1) + in_register(1) + reg_index(4) + size(4)
@@ -345,6 +454,8 @@ Result<ProcRecord> read_proc(Reader& r) {
     p.result_type = std::move(result.value());
     p.dump = std::move(dump.value());
     p.relocs = std::move(relocs.value());
+    p.fixups = std::move(fixups.value());
+    p.locals = std::move(locals.value());
     return Result<ProcRecord>::ok(std::move(p));
 }
 
@@ -352,12 +463,14 @@ Result<ProcRecord> read_proc(Reader& r) {
 
 Result<void> write_v3(std::filesystem::path path, const KbData& data) {
     // Serialize sections first.
-    size_t counts[kSectionCount] = {0, 0, 0, 0};
+    size_t counts[kSectionCount] = {};
     std::vector<std::byte> sections[kSectionCount];
     sections[0] = serialize_section(kSectionModules, data, counts[0]);
     sections[1] = serialize_section(kSectionConsts, data, counts[1]);
     sections[2] = serialize_section(kSectionTypes, data, counts[2]);
     sections[3] = serialize_section(kSectionProcs, data, counts[3]);
+    sections[4] = serialize_section(kSectionVars, data, counts[4]);
+    sections[5] = serialize_section(kSectionResStrings, data, counts[5]);
 
     // Build the header (checksum placeholder).
     Writer header;
@@ -552,6 +665,18 @@ Result<KbData> read_v3(std::span<const std::byte> buf) {
                     auto rec = read_proc(br);
                     if (!rec.has_value()) return Result<void>::err(rec.error(), rec.message());
                     data.procs.push_back(std::move(rec.value()));
+                    break;
+                }
+                case kSectionVars: {
+                    auto rec = read_var(br);
+                    if (!rec.has_value()) return Result<void>::err(rec.error(), rec.message());
+                    data.vars.push_back(std::move(rec.value()));
+                    break;
+                }
+                case kSectionResStrings: {
+                    auto rec = read_resstring(br);
+                    if (!rec.has_value()) return Result<void>::err(rec.error(), rec.message());
+                    data.resstrings.push_back(std::move(rec.value()));
                     break;
                 }
                 default:
