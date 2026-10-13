@@ -17,8 +17,10 @@ testing::AssertionResult v2_v3_round_trip_is_lossless(const fs::path& fixture) {
     auto v2 = idr::kb::KnowledgeBase::open(fixture);
     if (!v2.has_value()) return testing::AssertionFailure() << v2.message();
 
-    const fs::path out = fs::temp_directory_path() / "idr_parity.v3.bin";
+    const fs::path out =
+        fs::temp_directory_path() / (fixture.stem().string() + ".parity.v3.bin");
     if (!idr::kb::write_v3(out, v2.value().data()).has_value()) {
+        fs::remove(out);
         return testing::AssertionFailure() << "write_v3 failed";
     }
     auto v3 = idr::kb::KnowledgeBase::open(out);
