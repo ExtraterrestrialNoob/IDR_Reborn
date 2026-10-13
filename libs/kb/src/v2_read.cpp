@@ -32,11 +32,13 @@ Result<std::string> read_v2_string(Reader& r) {
 }
 
 // Read the dump block described by DumpTotal, returning the dump bytes and
-// storing the relocs. DumpTotal covers DumpSz(4) + FixupNum(4) + dump + relocs
-// + fixups; the fixup bytes are skipped (their exact layout is not needed).
-Result<std::vector<std::byte>> read_dump_and_skip_fixups(Reader& r,
-                                                         uint32_t dump_total,
-                                                         std::vector<std::byte>& relocs) {
+// storing the relocs and the raw fixup blob. DumpTotal covers DumpSize(4) +
+// FixupNum(4) + dump + relocs + fixups, so the fixup region is
+// dump_total - 8 - 2*dump_size bytes. The fixup bytes are captured verbatim;
+// their internal layout is not interpreted here.
+Result<std::vector<std::byte>> read_dump(Reader& r, uint32_t dump_total,
+                                         std::vector<std::byte>& relocs,
+                                         std::vector<std::byte>& fixups) {
     auto dump_sz = r.u32();
     if (!dump_sz.has_value()) {
         return Result<std::vector<std::byte>>::err(dump_sz.error(), dump_sz.message());
@@ -58,10 +60,11 @@ Result<std::vector<std::byte>> read_dump_and_skip_fixups(Reader& r,
     relocs = std::move(rel.value());
 
     const uint32_t fixup_bytes = dump_total - header_sz - 2u * dump_sz.value();
-    auto skipped = r.bytes(fixup_bytes);
-    if (!skipped.has_value()) {
-        return Result<std::vector<std::byte>>::err(skipped.error(), skipped.message());
+    auto fx = r.bytes(fixup_bytes);
+    if (!fx.has_value()) {
+        return Result<std::vector<std::byte>>::err(fx.error(), fx.message());
     }
+    fixups = std::move(fx.value());
     return dump;
 }
 
@@ -168,10 +171,15 @@ Result<KbData> read_v2(std::span<const std::byte> buf) {
 
     KbData data;
     data.format_version = 2;
+    // A v2 KB is always 32-bit Embarcadero; MSIL bytecode carries no native
+    // arch. The isMSIL byte sits at offset 24.
+    const bool is_msil = buf[24] != std::byte{0};
+    data.arch = is_msil ? Arch::unknown : Arch::x86;
+    data.vendor = "embarcadero";
+    data.vendor_code = 1;
     data.compiler_version = delphi_ver;
-    data.pointer_size = 0;
-    data.vendor.clear();
     data.compiler_id.clear();
+    data.pointer_size = 4;
 
     // Modules.
     for (const auto& info : modules) {
@@ -197,6 +205,14 @@ Result<KbData> read_v2(std::span<const std::byte> buf) {
             }
             m.uses_ids.push_back(use.value());
         }
+        // uses_num trailing PSTR names follow the numeric uses ids.
+        for (uint16_t i = 0; i < uses_num.value(); ++i) {
+            auto use_name = read_v2_string(r);
+            if (!use_name.has_value()) {
+                return Result<KbData>::err(use_name.error(), use_name.message());
+            }
+            m.uses_names.push_back(std::move(use_name.value()));
+        }
         data.modules.push_back(std::move(m));
     }
 
@@ -217,7 +233,8 @@ Result<KbData> read_v2(std::span<const std::byte> buf) {
             return Result<KbData>::err(ErrorCode::truncated, "short const record");
         }
         std::vector<std::byte> relocs;
-        auto dump = read_dump_and_skip_fixups(r, dump_total.value(), relocs);
+        std::vector<std::byte> fixups;
+        auto dump = read_dump(r, dump_total.value(), relocs, fixups);
         if (!dump.has_value()) return Result<KbData>::err(dump.error(), dump.message());
         c.module_id = mod.value();
         c.name = std::move(name.value());
@@ -226,6 +243,7 @@ Result<KbData> read_v2(std::span<const std::byte> buf) {
         c.value = std::move(value.value());
         c.dump = std::move(dump.value());
         c.relocs = std::move(relocs);
+        c.fixups = std::move(fixups);
         data.consts.push_back(std::move(c));
     }
 
@@ -248,7 +266,8 @@ Result<KbData> read_v2(std::span<const std::byte> buf) {
             return Result<KbData>::err(ErrorCode::truncated, "short type record");
         }
         std::vector<std::byte> relocs;
-        auto dump = read_dump_and_skip_fixups(r, dump_total.value(), relocs);
+        std::vector<std::byte> fixups;
+        auto dump = read_dump(r, dump_total.value(), relocs, fixups);
         if (!dump.has_value()) return Result<KbData>::err(dump.error(), dump.message());
 
         // Opaque blocks: fields, props, methods (each is length-prefixed by a
@@ -279,6 +298,7 @@ Result<KbData> read_v2(std::span<const std::byte> buf) {
         t.decl = std::move(decl.value());
         t.dump = std::move(dump.value());
         t.relocs = std::move(relocs);
+        t.fixups = std::move(fixups);
         t.fields = std::move(fields.value());
         t.props = std::move(props.value());
         t.methods = std::move(methods.value());
@@ -307,7 +327,8 @@ Result<KbData> read_v2(std::span<const std::byte> buf) {
             return Result<KbData>::err(ErrorCode::truncated, "short proc record");
         }
         std::vector<std::byte> relocs;
-        auto dump = read_dump_and_skip_fixups(r, dump_total.value(), relocs);
+        std::vector<std::byte> fixups;
+        auto dump = read_dump(r, dump_total.value(), relocs, fixups);
         if (!dump.has_value()) return Result<KbData>::err(dump.error(), dump.message());
 
         // Args: DWORD ArgsTotal (includes the 2-byte count), WORD ArgsNum,
@@ -328,6 +349,7 @@ Result<KbData> read_v2(std::span<const std::byte> buf) {
         p.result_type = std::move(result.value());
         p.dump = std::move(dump.value());
         p.relocs = std::move(relocs);
+        p.fixups = std::move(fixups);
         for (uint16_t i = 0; i < args_num.value(); ++i) {
             ArgRecord a;
             auto tag = r.u8();
@@ -350,7 +372,67 @@ Result<KbData> read_v2(std::span<const std::byte> buf) {
             a.type = std::move(atype.value());
             p.args.push_back(std::move(a));
         }
+
+        // Only the oldest format (Delphi 2) appends a trailing Locals block:
+        // DWORD LocalsTotal followed by exactly LocalsTotal bytes. When the
+        // record has ended after the args block, `locals` stays empty.
+        if (!r.eof()) {
+            auto locals_total = r.u32();
+            if (!locals_total.has_value()) {
+                return Result<KbData>::err(ErrorCode::truncated, "short proc locals");
+            }
+            auto locals = r.bytes(locals_total.value());
+            if (!locals.has_value()) {
+                return Result<KbData>::err(locals.error(), locals.message());
+            }
+            p.locals = std::move(locals.value());
+        }
         data.procs.push_back(std::move(p));
+    }
+
+    // Vars. Layout: u16 module_id, PSTR name, u8 type, PSTR type_def,
+    // PSTR abs_name (always present, may be empty).
+    for (const auto& info : vars) {
+        auto rr = record_reader(info);
+        if (!rr.has_value()) return Result<KbData>::err(rr.error(), rr.message());
+        Reader r = rr.value();
+        VarRecord v;
+        auto mod = r.u16();
+        auto name = read_v2_string(r);
+        auto type = r.u8();
+        auto tdef = read_v2_string(r);
+        auto abs_name = read_v2_string(r);
+        if (!mod.has_value() || !name.has_value() || !type.has_value() ||
+            !tdef.has_value() || !abs_name.has_value()) {
+            return Result<KbData>::err(ErrorCode::truncated, "short var record");
+        }
+        v.module_id = mod.value();
+        v.name = std::move(name.value());
+        v.type = static_cast<char>(type.value());
+        v.type_def = std::move(tdef.value());
+        v.abs_name = std::move(abs_name.value());
+        data.vars.push_back(std::move(v));
+    }
+
+    // ResStrings. Layout: u16 module_id, PSTR name, PSTR type_def, PSTR context.
+    for (const auto& info : resstr) {
+        auto rr = record_reader(info);
+        if (!rr.has_value()) return Result<KbData>::err(rr.error(), rr.message());
+        Reader r = rr.value();
+        ResStringRecord rs;
+        auto mod = r.u16();
+        auto name = read_v2_string(r);
+        auto tdef = read_v2_string(r);
+        auto ctx = read_v2_string(r);
+        if (!mod.has_value() || !name.has_value() || !tdef.has_value() ||
+            !ctx.has_value()) {
+            return Result<KbData>::err(ErrorCode::truncated, "short resstring record");
+        }
+        rs.module_id = mod.value();
+        rs.name = std::move(name.value());
+        rs.type_def = std::move(tdef.value());
+        rs.context = std::move(ctx.value());
+        data.resstrings.push_back(std::move(rs));
     }
 
     return Result<KbData>::ok(std::move(data));

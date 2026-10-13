@@ -544,6 +544,58 @@ TEST(KbV3, kb_equal_detects_a_field_difference) {
     EXPECT_FALSE(idr::kb::kb_equal(a, b));
 }
 
+TEST(KbLegacyV2, reads_all_sections_with_expected_counts) {
+    const fs::path fixture = fs::path(IDR_REPO_ROOT) / "syskb2014.bin";
+    if (!fs::exists(fixture)) GTEST_SKIP() << "syskb2014.bin absent";
+
+    auto opened = KnowledgeBase::open(fixture);
+    ASSERT_TRUE(opened.has_value()) << opened.message();
+    const auto& d = opened.value().data();
+
+    EXPECT_EQ(d.modules.size(), 2u);
+    EXPECT_EQ(d.consts.size(), 394u);
+    EXPECT_EQ(d.types.size(), 451u);
+    EXPECT_EQ(d.vars.size(), 82u);
+    EXPECT_EQ(d.resstrings.size(), 0u);
+    EXPECT_EQ(d.procs.size(), 1195u);
+
+    // Header facts implied by a non-MSIL v2 file.
+    EXPECT_EQ(d.arch, idr::kb::Arch::x86);
+    EXPECT_EQ(d.vendor, "embarcadero");
+    EXPECT_EQ(d.pointer_size, 4u);
+
+    // Module use-names are materialized (previously dropped).
+    ASSERT_FALSE(d.modules.empty());
+    EXPECT_FALSE(d.modules[0].uses_names.empty());
+    EXPECT_EQ(d.modules[0].uses_names.size(), d.modules[0].uses_ids.size());
+
+    // A dumped record carries raw fixup bytes when the file records any.
+    const bool saw_fixups = std::any_of(d.consts.begin(), d.consts.end(),
+                                        [](const idr::kb::ConstRecord& c) {
+                                            return !c.fixups.empty();
+                                        });
+    EXPECT_TRUE(saw_fixups);
+
+    // Vars decode: at least one named var with a type.
+    ASSERT_FALSE(d.vars.empty());
+    EXPECT_FALSE(d.vars[0].name.empty());
+}
+
+TEST(KbLegacyV2, reads_proc_locals_when_present) {
+    const fs::path fixture = fs::path(IDR_REPO_ROOT) / "syskb2.bin";
+    if (!fs::exists(fixture)) GTEST_SKIP() << "syskb2.bin absent";
+
+    auto opened = KnowledgeBase::open(fixture);
+    ASSERT_TRUE(opened.has_value()) << opened.message();
+    const auto& d = opened.value().data();
+
+    const bool saw_locals = std::any_of(d.procs.begin(), d.procs.end(),
+                                        [](const idr::kb::ProcRecord& p) {
+                                            return !p.locals.empty();
+                                        });
+    EXPECT_TRUE(saw_locals);
+}
+
 TEST(KbV3, write_read_write_is_byte_identical) {
     KbData kb = make_sample_kb();
     const auto p1 = temp_path("det1");
