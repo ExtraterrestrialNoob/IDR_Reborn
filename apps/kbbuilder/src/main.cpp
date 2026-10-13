@@ -121,10 +121,12 @@ int main(int argc, char** argv) {
     std::string out;
     std::string message;
     bool ok = false;
-    // Defense in depth: under MSVC the SEH `__except` in `guarded_run` matches
-    // C++ exceptions first, so these catch blocks are normally unreachable
-    // there. They are kept as a portable fallback for non-SEH builds (and
-    // document that no exception may escape `main`), not as dead code.
+    // Defense in depth: under MSVC's default `/EHsc`, the SEH guard in
+    // `guarded_run` (`__except(EXCEPTION_EXECUTE_HANDLER)`) does NOT catch C++
+    // exceptions; it only handles structured/Access-Violation faults. These
+    // catch blocks are therefore the C++-exception backstop (and document that
+    // no exception may escape `main`); they remain the only such backstop on
+    // non-SEH builds.
     try {
         ok = guarded_run(opt, out, message);
     } catch (const std::exception& e) {

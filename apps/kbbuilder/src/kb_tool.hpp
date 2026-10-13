@@ -23,5 +23,5 @@ idr::Result<void> kb_convert(const std::filesystem::path& in,
 // it, and asserts content equality with the original (see `kb_equal`). Returns
 // an error when any step fails; on a content mismatch the error is
 // `ErrorCode::unsupported_format` with message "content differs". The
-// temporary file is always removed before returning.
+// temporary file is removed on every normal exit path.
 idr::Result<void> kb_verify(const std::filesystem::path& in);
