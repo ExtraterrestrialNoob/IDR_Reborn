@@ -52,7 +52,7 @@ Failure modes the spec implies but no single happy-path test catches; the owning
   - `TypeRecord`: add `std::vector<std::byte> fixups;`
   - `ProcRecord`: **change** `std::vector<uint32_t> fixups` → `std::vector<std::byte> fixups;` and add `std::vector<std::byte> locals;`
   - `KbData`: add `std::vector<VarRecord> vars;` and `std::vector<ResStringRecord> resstrings;`
-  - `bool kb_equal(const KbData& a, const KbData& b);`
+  - `bool kb_equal(const KbData& a, const KbData& b);` — **declared in `records.hpp`**, defined in `kb_equal.cpp`.
 - Produces (wire): v3 gains sections `5 = Vars`, `6 = ResStrings`; `kSectionCount = 6`.
 
 - [ ] **Step 1: Write the failing tests** — append to `libs/kb/tests/kb_test.cpp`:
@@ -304,6 +304,8 @@ namespace {
 
 // Reads `fixture` (v2), converts to v3, reads it back, and asserts content
 // equality. Returns false only when a step failed (so callers can ASSERT).
+// Content equality ignores the container format_version (see kb_equal), so a
+// v2->v3 conversion is expected to compare equal.
 testing::AssertionResult v2_v3_round_trip_is_lossless(const fs::path& fixture) {
     auto v2 = idr::kb::KnowledgeBase::open(fixture);
     if (!v2.has_value()) return testing::AssertionFailure() << v2.message();
